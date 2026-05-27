@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -197,6 +198,20 @@ func New(cfg Config) http.Handler {
 		writeJSON(w, http.StatusOK, out)
 	})
 
+	mux.HandleFunc("GET /v1/forecast", func(w http.ResponseWriter, r *http.Request) {
+		budgetUSD := monthlyBudget()
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Forecast(budgetUSD))
+			return
+		}
+		out, err := stats.MonthForecast(cfg.DB, budgetUSD)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
 	// Static UI.
 	if cfg.StaticDir != "" {
 		fs := http.FileServer(http.Dir(cfg.StaticDir))
@@ -299,6 +314,19 @@ func intParam(r *http.Request, key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// monthlyBudget reads SESSIONLENS_MONTHLY_BUDGET_USD, defaulting to 100.
+func monthlyBudget() float64 {
+	raw := os.Getenv("SESSIONLENS_MONTHLY_BUDGET_USD")
+	if raw == "" {
+		return 100.0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 100.0
+	}
+	return v
 }
 
 func logMiddleware(next http.Handler) http.Handler {

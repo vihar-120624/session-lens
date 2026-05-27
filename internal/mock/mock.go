@@ -399,6 +399,42 @@ func (d Dataset) ByModel(days int) stats.ByModelResponse {
 	return stats.AggregateByModel(rows)
 }
 
+// Forecast computes a burn-rate forecast from the mock dataset anchored to refNow.
+func (d Dataset) Forecast(budgetUSD float64) stats.Forecast {
+	monthStart := time.Date(refNow.Year(), refNow.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	// Month-to-date sum.
+	var mtd float64
+	for _, s := range d.Sessions {
+		if !s.EndedAt.Before(monthStart) {
+			mtd += s.TotalCostUSD
+		}
+	}
+
+	// Daily costs for last 7 days (capped at month start).
+	window := 7
+	windowStart := refNow.AddDate(0, 0, -(window - 1))
+	if windowStart.Before(monthStart) {
+		windowStart = monthStart
+	}
+	cutoff := time.Date(windowStart.Year(), windowStart.Month(), windowStart.Day(), 0, 0, 0, 0, time.UTC)
+
+	dayMap := map[string]float64{}
+	for _, s := range d.Sessions {
+		if s.EndedAt.Before(cutoff) {
+			continue
+		}
+		key := s.EndedAt.UTC().Format("2006-01-02")
+		dayMap[key] += s.TotalCostUSD
+	}
+	dailyCosts := make([]float64, 0, len(dayMap))
+	for _, c := range dayMap {
+		dailyCosts = append(dailyCosts, c)
+	}
+
+	return stats.ComputeForecast(mtd, dailyCosts, budgetUSD, refNow)
+}
+
 // Spikes runs the detector against the dataset.
 func (d Dataset) Spikes(cfg stats.SpikeConfig) []stats.Spike {
 	sessions := make([]stats.SessionRecord, 0, len(d.Sessions))

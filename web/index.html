@@ -62,6 +62,30 @@
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
       margin-bottom: 24px;
     }
+    .grid-5 {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+      margin-bottom: 24px;
+    }
+    .grid-5 .forecast-card {
+      grid-column: span 4;
+      display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 16px;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+    }
+    .forecast-card .fc-item .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .forecast-card .fc-item .value { font-size: 22px; font-weight: 600; }
+    .forecast-card .fc-item .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .forecast-card .fc-badge {
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      padding: 0 16px; gap: 6px;
+    }
+    .badge { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+    .badge.ok   { background: rgba(74,222,128,0.15); color: var(--good); }
+    .badge.over { background: rgba(248,113,113,0.18); color: var(--bad); }
+    .forecast-progress { background: var(--border); border-radius: 4px; height: 6px; margin-top: 10px; overflow: hidden; width: 100%; }
+    .forecast-progress .bar { height: 100%; transition: width 0.3s ease; }
+    .forecast-progress .bar.ok   { background: var(--good); }
+    .forecast-progress .bar.over { background: var(--bad); }
     .card {
       background: var(--card); border: 1px solid var(--border);
       border-radius: 10px; padding: 16px;
@@ -153,6 +177,32 @@
       <div class="value" id="util">—</div>
       <div class="sub" id="util-sub"></div>
       <div class="progress"><div class="bar" id="util-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- Forecast card -->
+  <div class="grid-5">
+    <div class="forecast-card">
+      <div class="fc-item">
+        <div class="label">Projected month total</div>
+        <div class="value" id="fc-projected">—</div>
+        <div class="sub" id="fc-sub-projected"></div>
+        <div class="forecast-progress"><div class="bar" id="fc-bar" style="width:0%"></div></div>
+      </div>
+      <div class="fc-item">
+        <div class="label">Month to date</div>
+        <div class="value" id="fc-mtd">—</div>
+        <div class="sub" id="fc-sub-mtd"></div>
+      </div>
+      <div class="fc-item">
+        <div class="label">Daily avg (last 7d)</div>
+        <div class="value" id="fc-daily-avg">—</div>
+        <div class="sub" id="fc-sub-days"></div>
+      </div>
+      <div class="fc-badge">
+        <span class="badge" id="fc-badge">—</span>
+        <div class="sub" id="fc-overage" style="text-align:center"></div>
+      </div>
     </div>
   </div>
 
@@ -440,6 +490,33 @@ function renderSpikes(rows) {
   empty.hidden = true;
 }
 
+function renderForecast(f) {
+  document.getElementById("fc-projected").textContent = fmt.usd(f.projected_month_total_usd);
+  document.getElementById("fc-mtd").textContent = fmt.usd(f.month_to_date_usd);
+  document.getElementById("fc-daily-avg").textContent = fmt.usd(f.daily_avg_last_7d_usd);
+  document.getElementById("fc-sub-days").textContent = f.days_remaining + " days remaining";
+  document.getElementById("fc-sub-mtd").textContent = "budget " + fmt.usd(f.budget_usd);
+  document.getElementById("fc-sub-projected").textContent = "of " + fmt.usd(f.budget_usd) + " budget";
+
+  const bar = document.getElementById("fc-bar");
+  const badge = document.getElementById("fc-badge");
+  const overage = document.getElementById("fc-overage");
+  const pct = f.budget_usd > 0 ? Math.min(100, (f.projected_month_total_usd / f.budget_usd) * 100) : 0;
+  bar.style.width = pct + "%";
+
+  if (f.on_track) {
+    bar.className = "bar ok";
+    badge.className = "badge ok";
+    badge.textContent = "On track";
+    overage.textContent = "";
+  } else {
+    bar.className = "bar over";
+    badge.className = "badge over";
+    badge.textContent = "Over budget";
+    overage.textContent = "+" + fmt.usd(f.overage_estimate_usd) + " est. overage";
+  }
+}
+
 function renderProjects(rows) {
   const body = document.getElementById("projects-body");
   if (!rows || rows.length === 0) {
@@ -577,8 +654,9 @@ let hourlyDays = 7;
 
 async function loadAll() {
   try {
-    const [summary, daily, byModel, hourly, spikes, projects, sessions] = await Promise.all([
+    const [summary, forecast, daily, byModel, hourly, spikes, projects, sessions] = await Promise.all([
       getJSON("/v1/stats/summary"),
+      getJSON("/v1/forecast"),
       getJSON("/v1/stats/daily?days=30"),
       getJSON("/v1/stats/by-model?days=14"),
       getJSON("/v1/stats/hourly?days=" + hourlyDays),
@@ -587,6 +665,7 @@ async function loadAll() {
       getJSON("/v1/sessions?limit=20"),
     ]);
     renderSummary(summary);
+    renderForecast(forecast);
     renderHourly(hourly);
     renderByModel(byModel);
     renderDaily(daily);
