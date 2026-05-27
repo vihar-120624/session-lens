@@ -139,6 +139,15 @@
     .detail-item .dv.mono { font-family: monospace; font-size: 13px; font-weight: 400; word-break: break-all; }
     .back-btn { background: var(--border); color: var(--muted); border: 0; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; margin-bottom: 12px; }
     .back-btn:hover { color: var(--text); }
+
+    /* SSE live indicator */
+    .live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
+    .live-dot.connected { background: var(--good); animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
   </style>
 </head>
 <body>
@@ -150,6 +159,7 @@
         <input type="checkbox" id="mock-input" />
         <span>Mock mode</span>
       </label>
+      <div class="live"><span class="live-dot" id="live-dot"></span><span id="live-text">live</span></div>
       <div class="health"><span class="dot" id="dot"></span><span id="health-text">checking...</span></div>
     </div>
   </header>
@@ -718,6 +728,33 @@ async function syncInitialMock() {
   }
 }
 
+// SSE live-tail
+function initSSE() {
+  const dot = document.getElementById("live-dot");
+  const txt = document.getElementById("live-text");
+
+  function setLiveState(connected) {
+    dot.classList.toggle("connected", connected);
+    txt.textContent = connected ? "live" : "offline";
+  }
+
+  const es = new EventSource("/v1/events");
+
+  es.addEventListener("open", () => {
+    setLiveState(true);
+  });
+
+  es.addEventListener("session", () => {
+    // A new session was ingested — refresh all cards.
+    loadAll().catch(console.error);
+  });
+
+  es.addEventListener("error", () => {
+    setLiveState(false);
+    // EventSource will automatically attempt to reconnect.
+  });
+}
+
 async function main() {
   setMonth();
   wireToggles();
@@ -747,6 +784,9 @@ async function main() {
   if (window.location.hash.startsWith("#session/")) {
     await handleHashChange();
   }
+
+  // Start SSE live-tail after initial data load.
+  initSSE();
 }
 main();
 </script>

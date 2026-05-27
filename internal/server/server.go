@@ -20,6 +20,11 @@ import (
 	"github.com/viharshah/session-lens/internal/stats"
 )
 
+// flusher is satisfied by http.ResponseWriters that support streaming.
+type flusher interface {
+	Flush()
+}
+
 // Version is reported by /healthz.
 const Version = "0.2.0"
 
@@ -29,6 +34,7 @@ type Config struct {
 	StaticDir     string
 	PlanBudgetUSD float64
 	MockDefault   bool // initial state of mock mode (driven by env var)
+	Hub           *Hub // SSE broadcast hub; if nil a no-op hub is used
 }
 
 // modeFlag holds a thread-safe bool; UI toggles it via POST /v1/mode.
@@ -44,6 +50,12 @@ func New(cfg Config) http.Handler {
 	mode.Set(cfg.MockDefault)
 	// Cache the mock dataset once per process: it's deterministic.
 	dataset := mock.Generate()
+
+	// Use caller-supplied hub or a fresh one if none was provided.
+	hub := cfg.Hub
+	if hub == nil {
+		hub = NewHub()
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version, "mock": mode.Get()})
@@ -65,8 +77,13 @@ func New(cfg Config) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"mock": mode.Get()})
 	})
 
+	// GET /v1/events — SSE live-tail of ingested sessions.
+	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
+		handleSSE(w, r, hub)
+	})
+
 	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		handleCreateSession(w, r, cfg)
+		handleCreateSession(w, r, cfg, hub)
 	})
 
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +267,7 @@ type SessionEvent struct {
 	RawPayload       string  `json:"raw_payload,omitempty"`
 }
 
-func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config) {
+func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub) {
 	defer r.Body.Close()
 	var ev SessionEvent
 	dec := json.NewDecoder(r.Body)
@@ -285,11 +302,60 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Notify SSE subscribers of the new/updated session.
+	hub.Broadcast(out)
 	status := http.StatusOK
 	if inserted {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, out)
+}
+
+// handleSSE streams newly-ingested sessions as Server-Sent Events.
+// Each event looks like:
+//
+//	event: session
+//	data: {"id":"...","project_path":"...",...}
+//
+// The connection stays open until the client disconnects.
+func handleSSE(w http.ResponseWriter, r *http.Request, hub *Hub) {
+	f, ok := w.(flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Disable any proxy buffering (nginx et al.).
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	// Send an initial comment so the browser's EventSource knows the stream is open.
+	fmt.Fprint(w, ": connected\n\n")
+	f.Flush()
+
+	ch := hub.Subscribe()
+	defer hub.Unsubscribe(ch)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case s, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(s)
+			if err != nil {
+				log.Printf("sse marshal: %v", err)
+				continue
+			}
+			fmt.Fprintf(w, "event: session\ndata: %s\n\n", data)
+			f.Flush()
+		}
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
