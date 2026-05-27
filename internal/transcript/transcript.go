@@ -89,10 +89,13 @@ func Parse(r io.Reader) (*Summary, error) {
 			s.Model = rl.Message.Model
 		}
 		if rl.Message.Usage != nil {
-			s.InputTokens += rl.Message.Usage.InputTokens
-			s.OutputTokens += rl.Message.Usage.OutputTokens
-			s.CacheReadTokens += rl.Message.Usage.CacheReadInputTokens
-			s.CacheWriteTokens += rl.Message.Usage.CacheCreationInputTokens
+			// Clamp each field to 0 before accumulating; negative token values
+			// from a malformed or adversarial transcript must not corrupt the
+			// running sums or the downstream cost calculation.
+			s.InputTokens += clampTokens(rl.Message.Usage.InputTokens)
+			s.OutputTokens += clampTokens(rl.Message.Usage.OutputTokens)
+			s.CacheReadTokens += clampTokens(rl.Message.Usage.CacheReadInputTokens)
+			s.CacheWriteTokens += clampTokens(rl.Message.Usage.CacheCreationInputTokens)
 		}
 	}
 	if err := scanner.Err(); err != nil {

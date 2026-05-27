@@ -182,3 +182,80 @@ func TestNoSpikeNotification(t *testing.T) {
 		t.Fatalf("expected no Notify calls for normal session, got %d: %+v", len(calls), calls)
 	}
 }
+
+// TestNoNotification_ZeroCostSession verifies that a session with TotalCostUSD
+// == 0 does NOT fire the notifier, regardless of the rolling average.
+// This pins the `ev.TotalCostUSD > 0` guard in server.go.
+func TestNoNotification_ZeroCostSession(t *testing.T) {
+	stub := &stubNotifier{}
+	ts, conn := newSpikeTestServer(t, stub)
+	defer ts.Close()
+
+	// Seed a high baseline so the zero-cost session would exceed 2x IF the guard
+	// were absent.
+	for i := 1; i <= 3; i++ {
+		row := db.Session{
+			ID:           "base-zc-" + string(rune('0'+i)),
+			StartedAt:    daysAgo(i + 1),
+			EndedAt:      daysAgo(i),
+			TotalCostUSD: 0.50,
+			Model:        "claude-sonnet",
+			Turns:        1,
+		}
+		if _, _, err := db.UpsertSession(conn, row); err != nil {
+			t.Fatalf("seed baseline: %v", err)
+		}
+	}
+
+	zero := db.Session{
+		ID:           "zero-cost-sess",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339),
+		EndedAt:      time.Now().UTC().Format(time.RFC3339),
+		TotalCostUSD: 0,
+		Model:        "claude-sonnet",
+		Turns:        1,
+	}
+	status := postSession(t, ts, zero)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 got %d", status)
+	}
+
+	// Give the goroutine time to run (it would fire quickly if unguarded).
+	time.Sleep(150 * time.Millisecond)
+
+	calls := stub.Calls()
+	if len(calls) != 0 {
+		t.Fatalf("expected no Notify calls for zero-cost session, got %d: %+v", len(calls), calls)
+	}
+}
+
+// TestNoNotification_EmptyRollingWindow verifies that the very first session
+// (empty rolling window → avg=0) does NOT fire the notifier even if its cost
+// is large. This pins the `avg > 0` guard in server.go.
+func TestNoNotification_EmptyRollingWindow(t *testing.T) {
+	stub := &stubNotifier{}
+	ts, _ := newSpikeTestServer(t, stub)
+	defer ts.Close()
+
+	// No baseline sessions — rolling window is empty.
+	first := db.Session{
+		ID:           "first-ever-session",
+		StartedAt:    time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339),
+		EndedAt:      time.Now().UTC().Format(time.RFC3339),
+		TotalCostUSD: 99.99, // very large cost, but avg==0 so no notification expected
+		Model:        "claude-opus",
+		Turns:        10,
+	}
+	status := postSession(t, ts, first)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 got %d", status)
+	}
+
+	// Give the goroutine time to run.
+	time.Sleep(150 * time.Millisecond)
+
+	calls := stub.Calls()
+	if len(calls) != 0 {
+		t.Fatalf("expected no Notify on first session (empty window avg=0), got %d: %+v", len(calls), calls)
+	}
+}

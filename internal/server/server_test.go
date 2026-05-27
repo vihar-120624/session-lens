@@ -156,6 +156,30 @@ func TestGetSession_404(t *testing.T) {
 	}
 }
 
+// TestMethodNotAllowed_405 verifies that sending the wrong HTTP method to a
+// route that is registered for a specific method returns 405 Method Not Allowed.
+// This pins the Go 1.22 ServeMux method-routing behaviour.
+func TestMethodNotAllowed_405(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	// GET /v1/sessions/{id} is the only registered method for this path pattern.
+	// POSTing to it must return 405 (not 404).
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/sessions/some-id", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed for POST /v1/sessions/{id}, got %d", resp.StatusCode)
+	}
+}
+
 // TestGetSession_MockMode verifies that mock sessions surface via the new
 // endpoint when mock mode is enabled (mock=1 query param).
 func TestGetSession_MockMode(t *testing.T) {

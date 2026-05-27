@@ -296,7 +296,12 @@ func (d Dataset) Hourly(days int) []stats.Bucket {
 	return out
 }
 
-// Weekly bucket aggregation for the dataset (ISO-ish year-week).
+// Weekly bucket aggregation for the dataset.
+// The week key matches SQLite's strftime('%Y-W%W', ...) exactly:
+// calendar year + Monday-based week number (00-53), where week 00 is
+// the partial week before the first Monday of the year.
+// Previously this used Go's ISOWeek(), which diverges at year boundaries
+// (e.g. 2025-12-29 ISO = 2026-W01 but SQLite = 2025-W52).
 func (d Dataset) Weekly(weeks int) []stats.Bucket {
 	if weeks <= 0 {
 		weeks = 12
@@ -308,8 +313,7 @@ func (d Dataset) Weekly(weeks int) []stats.Bucket {
 		if s.EndedAt.Before(cutoff) {
 			continue
 		}
-		year, week := s.EndedAt.UTC().ISOWeek()
-		key := isoKey(year, week)
+		key := sqliteWeekKey(s.EndedAt.UTC())
 		b, ok := buckets[key]
 		if !ok {
 			b = &stats.Bucket{Bucket: key}
@@ -331,12 +335,32 @@ func (d Dataset) Weekly(weeks int) []stats.Bucket {
 	return out
 }
 
-func isoKey(year, week int) string {
+// sqliteWeekKey replicates SQLite's strftime('%Y-W%W', t) in Go.
+// %W = Monday-based week number (00-53); %Y = calendar year.
+// Week 01 begins on the first Monday of the year; week 00 contains
+// any days before that first Monday.
+func sqliteWeekKey(t time.Time) string {
+	// Weekday of Jan 1 in the same year (Sun=0, Mon=1, ..., Sat=6).
+	jan1 := time.Date(t.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
+	jan1Weekday := int(jan1.Weekday())
+	// 1-indexed day-of-year on which the first Monday falls.
+	// (8 - jan1Weekday) % 7 gives 0 when Jan 1 is Monday, 1 when Sunday, etc.
+	firstMondayDOY := 1 + (8-jan1Weekday)%7
+	// 0-indexed day-of-year of t.
+	yearDay := t.YearDay() // 1-indexed
+	// Distance from first Monday (may be negative, meaning week 00).
+	dist := yearDay - firstMondayDOY
+	var week int
+	if dist < 0 {
+		week = 0
+	} else {
+		week = dist/7 + 1
+	}
 	w := itoa(week)
 	if len(w) == 1 {
 		w = "0" + w
 	}
-	return itoa(year) + "-W" + w
+	return itoa(t.Year()) + "-W" + w
 }
 
 // Projects rollup for the dataset.

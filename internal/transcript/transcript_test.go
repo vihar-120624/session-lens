@@ -128,3 +128,91 @@ func TestParseEmpty(t *testing.T) {
 		t.Errorf("expected empty summary, got %+v", s)
 	}
 }
+
+// TestComputeCostNegativeInputsClamped verifies that ComputeCost clamps
+// negative token values to 0 rather than producing a negative cost.
+func TestComputeCostNegativeInputsClamped(t *testing.T) {
+	cases := []struct {
+		name                     string
+		in, out, cr, cw          int64
+		wantNonNegative          bool
+		wantExactZero            bool
+	}{
+		{"all negative clamp to zero", -1000, -500, -200, -100, true, true},
+		{"negative input only", -100, 50, 0, 0, true, false},
+		{"negative output only", 100, -50, 0, 0, true, false},
+		{"mixed negative and positive", -100, 200, -50, 100, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ComputeCost("claude-sonnet", c.in, c.out, c.cr, c.cw)
+			if got < 0 {
+				t.Errorf("ComputeCost(%d,%d,%d,%d) = %v, want >= 0 (negative clamp failed)",
+					c.in, c.out, c.cr, c.cw, got)
+			}
+			if c.wantExactZero && got != 0 {
+				t.Errorf("ComputeCost(%d,%d,%d,%d) = %v, want exactly 0",
+					c.in, c.out, c.cr, c.cw, got)
+			}
+		})
+	}
+}
+
+// TestParseNegativeTokensProduceZeroCost verifies that a transcript line
+// carrying negative token counts does not produce a negative TotalCostUSD.
+// The parser must clamp each field to 0 before accumulating.
+func TestParseNegativeTokensProduceZeroCost(t *testing.T) {
+	jsonl := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-05-27T10:00:00Z","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":-500,"output_tokens":-200,"cache_read_input_tokens":-50,"cache_creation_input_tokens":-10}}}`,
+	}, "\n")
+
+	s, err := Parse(strings.NewReader(jsonl))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if s.TotalCostUSD < 0 {
+		t.Errorf("TotalCostUSD = %v with all-negative tokens, want >= 0", s.TotalCostUSD)
+	}
+	if s.TotalCostUSD != 0 {
+		t.Errorf("TotalCostUSD = %v with all-negative tokens clamped to 0, want exactly 0", s.TotalCostUSD)
+	}
+	// Accumulated token counts must not be negative.
+	if s.InputTokens < 0 {
+		t.Errorf("InputTokens = %d, want 0 (clamped)", s.InputTokens)
+	}
+	if s.OutputTokens < 0 {
+		t.Errorf("OutputTokens = %d, want 0 (clamped)", s.OutputTokens)
+	}
+	if s.CacheReadTokens < 0 {
+		t.Errorf("CacheReadTokens = %d, want 0 (clamped)", s.CacheReadTokens)
+	}
+	if s.CacheWriteTokens < 0 {
+		t.Errorf("CacheWriteTokens = %d, want 0 (clamped)", s.CacheWriteTokens)
+	}
+}
+
+// TestParseNegativeTokensMixedWithPositive verifies that a transcript with one
+// negative-token line and one valid positive-token line produces the correct
+// cost for the positive line only (the negative line contributes 0).
+func TestParseNegativeTokensMixedWithPositive(t *testing.T) {
+	jsonl := strings.Join([]string{
+		// Negative line: should contribute 0 cost.
+		`{"type":"assistant","timestamp":"2026-05-27T10:00:00Z","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":-100,"output_tokens":-50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+		// Valid positive line: 1_000_000 input tokens only.
+		`{"type":"assistant","timestamp":"2026-05-27T10:00:01Z","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1000000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+	}, "\n")
+
+	s, err := Parse(strings.NewReader(jsonl))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	// Expected: 1_000_000 sonnet input tokens = $3.00 exactly.
+	const wantCost = 3.00
+	if !approxEqual(s.TotalCostUSD, wantCost) {
+		t.Errorf("TotalCostUSD = %v, want %v (only positive line should contribute)", s.TotalCostUSD, wantCost)
+	}
+	// Accumulated input tokens: clamped negative (0) + 1_000_000 = 1_000_000.
+	if s.InputTokens != 1_000_000 {
+		t.Errorf("InputTokens = %d, want 1000000", s.InputTokens)
+	}
+}

@@ -47,11 +47,21 @@ func PricingFor(model string) Pricing {
 }
 
 // ComputeCost returns the USD cost for a token-usage tuple under the given model.
+// Negative token counts are clamped to 0 to prevent corrupting cost aggregations.
 func ComputeCost(model string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64) float64 {
 	p := PricingFor(model)
 	const perM = 1_000_000.0
-	return (float64(inputTokens)*p.InputPerM +
-		float64(outputTokens)*p.OutputPerM +
-		float64(cacheReadTokens)*p.CacheReadPerM +
-		float64(cacheWriteTokens)*p.CacheWritePerM) / perM
+	return (float64(clampTokens(inputTokens))*p.InputPerM +
+		float64(clampTokens(outputTokens))*p.OutputPerM +
+		float64(clampTokens(cacheReadTokens))*p.CacheReadPerM +
+		float64(clampTokens(cacheWriteTokens))*p.CacheWritePerM) / perM
+}
+
+// clampTokens returns v if v >= 0, otherwise 0. Guards against negative token
+// values that would corrupt cost calculations.
+func clampTokens(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }

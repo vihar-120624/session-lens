@@ -3,7 +3,28 @@ package stats
 import (
 	"testing"
 	"time"
+
+	"github.com/viharshah/session-lens/internal/db"
 )
+
+// TestRollingAvgCostUSD_EmptyWindow verifies that RollingAvgCostUSD returns
+// exactly 0 (no panic, no error) when there are no sessions in the 7-day
+// window.
+func TestRollingAvgCostUSD_EmptyWindow(t *testing.T) {
+	conn, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer conn.Close()
+
+	avg, err := RollingAvgCostUSD(conn)
+	if err != nil {
+		t.Fatalf("RollingAvgCostUSD error on empty DB: %v", err)
+	}
+	if avg != 0 {
+		t.Errorf("RollingAvgCostUSD on empty DB = %v, want 0", avg)
+	}
+}
 
 func TestDetectSessionSpikes(t *testing.T) {
 	base := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
