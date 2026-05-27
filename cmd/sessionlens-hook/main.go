@@ -5,6 +5,16 @@
 // Operational contract: this binary MUST NOT block or fail Claude Code.
 // Every error path is swallowed, the process always exits 0, and a panic
 // recover guards main.
+//
+// Retry + buffer policy:
+//   - On POST failure (network error or 5xx) the event is retried up to 3 times
+//     with exponential back-off: 1 s, 2 s, 4 s.
+//   - 4xx responses are non-retryable (log + drop; server bug, not transient).
+//   - If all retries exhaust the event is written to the on-disk buffer
+//     ($XDG_STATE_HOME/sessionlens/buffer/ or ~/.local/state/sessionlens/buffer/).
+//   - Before posting the current event, any previously buffered events are
+//     drained: each file is attempted once; success → delete, failure → leave.
+//   - The buffer is capped at 100 files; oldest are removed to make room.
 package main
 
 import (
@@ -12,9 +22,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
-	"strconv"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/viharshah/session-lens/internal/transcript"
@@ -49,7 +61,16 @@ const (
 	defaultServer = "http://127.0.0.1:7821/v1/sessions"
 	hookLogPath   = "/tmp/session-lens-hook.log"
 	hookTimeout   = 1500 * time.Millisecond
+	bufferCap     = 100
 )
+
+// retryBackoff is the sequence of waits between attempts (3 tries total).
+var retryBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+
+// httpPoster abstracts net/http for test injection.
+type httpPoster interface {
+	Do(*http.Request) (*http.Response, error)
+}
 
 func main() {
 	// Belt-and-suspenders: a panic anywhere below must not propagate to Claude.
@@ -60,10 +81,21 @@ func main() {
 		os.Exit(0)
 	}()
 
-	run()
+	client := &http.Client{Timeout: hookTimeout}
+	run(client)
 }
 
-func run() {
+func run(client httpPoster) {
+	url := os.Getenv(serverURLEnv)
+	if url == "" {
+		url = defaultServer
+	}
+
+	bufDir := bufferDir()
+
+	// Always drain buffered events before posting the current one.
+	drainBuffer(client, url, bufDir)
+
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		logErr(fmt.Errorf("read stdin: %w", err))
@@ -120,30 +152,111 @@ func run() {
 		return
 	}
 
-	url := os.Getenv(serverURLEnv)
-	if url == "" {
-		url = defaultServer
+	if err := postWithRetry(client, url, body); err != nil {
+		logErr(fmt.Errorf("post failed after retries: %w; buffering", err))
+		if bufErr := writeBuffer(bufDir, body); bufErr != nil {
+			logErr(fmt.Errorf("buffer write: %w", bufErr))
+		}
 	}
+}
 
-	client := &http.Client{Timeout: hookTimeout}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		logErr(fmt.Errorf("build request: %w", err))
+// postWithRetry attempts to POST body to url up to len(retryBackoff)+1 times.
+// Network errors and 5xx responses are retried; 4xx responses are dropped.
+func postWithRetry(client httpPoster, url string, body []byte) error {
+	var lastErr error
+	attempts := len(retryBackoff) + 1
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(retryBackoff[i-1])
+		}
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "sessionlens-hook/0.1")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("network: %w", err)
+			logErr(fmt.Errorf("attempt %d/%d failed: %w", i+1, attempts, lastErr))
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("server %d", resp.StatusCode)
+			logErr(fmt.Errorf("attempt %d/%d failed: %w", i+1, attempts, lastErr))
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			// Non-retryable client error.
+			return fmt.Errorf("non-retryable %d", resp.StatusCode)
+		}
+		// Success.
+		return nil
+	}
+	return lastErr
+}
+
+// drainBuffer iterates over buffered event files and attempts to post each one.
+// Successful deliveries are deleted; failures are left for the next run.
+func drainBuffer(client httpPoster, url, dir string) {
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil || len(files) == 0 {
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "sessionlens-hook/0.1")
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			logErr(fmt.Errorf("drain read %s: %w", f, err))
+			continue
+		}
+		if err := postWithRetry(client, url, data); err != nil {
+			logErr(fmt.Errorf("drain post %s: %w", f, err))
+			continue
+		}
+		if err := os.Remove(f); err != nil {
+			logErr(fmt.Errorf("drain delete %s: %w", f, err))
+		}
+	}
+}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		logErr(fmt.Errorf("post: %w", err))
-		return
+// writeBuffer persists body to the buffer directory.
+// If the buffer already holds bufferCap files the oldest are removed to make room.
+func writeBuffer(dir string, body []byte) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir buffer: %w", err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode >= 400 {
-		logErr(fmt.Errorf("server returned " + strconv.Itoa(resp.StatusCode)))
+
+	// Enforce cap.
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err == nil && len(files) >= bufferCap {
+		// Sort by name (timestamp prefix → chronological order).
+		sort.Strings(files)
+		toRemove := len(files) - bufferCap + 1
+		for _, old := range files[:toRemove] {
+			_ = os.Remove(old)
+		}
 	}
+
+	name := fmt.Sprintf("%d-%06d.json", time.Now().UnixNano(), rand.Intn(1_000_000))
+	path := filepath.Join(dir, name)
+	return os.WriteFile(path, body, 0o644)
+}
+
+// bufferDir returns the path to the buffer directory.
+func bufferDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "/tmp"
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "sessionlens", "buffer")
 }
 
 // logErr appends an error line to the hook log. Failures here are silent.
@@ -158,3 +271,4 @@ func logErr(err error) {
 	defer f.Close()
 	fmt.Fprintf(f, "%s %v\n", time.Now().UTC().Format(time.RFC3339), err)
 }
+
