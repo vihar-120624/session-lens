@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>session-lens</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0e0e10;
+      --card: #1a1a1f;
+      --text: #e8e8ea;
+      --muted: #8a8a92;
+      --accent: #7c8cff;
+      --good: #4ade80;
+      --bad: #f87171;
+      --border: #26262d;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    h1 .accent { color: var(--accent); }
+    .month { color: var(--muted); margin-left: 12px; font-weight: 400; }
+    .health { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .dot.ok { background: var(--good); }
+    .dot.bad { background: var(--bad); }
+    .grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+    }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .card .value { font-size: 24px; font-weight: 600; }
+    .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .progress { background: var(--border); border-radius: 4px; height: 6px; margin-top: 10px; overflow: hidden; }
+    .progress .bar { background: var(--accent); height: 100%; transition: width 0.3s ease; }
+    .progress .bar.over { background: var(--bad); }
+    h2 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 12px 0; }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 24px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr:last-child td { border-bottom: none; }
+    .empty { color: var(--muted); padding: 32px; text-align: center; }
+    .chart-wrap { height: 280px; position: relative; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="accent">session</span>-lens<span class="month" id="month"></span></h1>
+    <div class="health"><span class="dot" id="dot"></span><span id="health-text">checking...</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Tokens this month</div>
+      <div class="value" id="tokens">—</div>
+      <div class="sub" id="tokens-sub"></div>
+    </div>
+    <div class="card">
+      <div class="label">Cost</div>
+      <div class="value" id="cost">—</div>
+      <div class="sub" id="cost-sub"></div>
+    </div>
+    <div class="card">
+      <div class="label">Sessions</div>
+      <div class="value" id="sessions">—</div>
+      <div class="sub"></div>
+    </div>
+    <div class="card">
+      <div class="label">Plan utilisation</div>
+      <div class="value" id="util">—</div>
+      <div class="sub" id="util-sub"></div>
+      <div class="progress"><div class="bar" id="util-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Last 14 days</h2>
+    <div class="chart-wrap"><canvas id="daily-chart"></canvas></div>
+    <div class="empty" id="daily-empty" hidden>No sessions recorded yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Top projects</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th class="num">Sessions</th>
+          <th class="num">Tokens</th>
+          <th class="num">Cost</th>
+        </tr>
+      </thead>
+      <tbody id="projects-body">
+        <tr><td colspan="4" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const fmt = {
+  num: (n) => Number(n || 0).toLocaleString("en-US"),
+  usd: (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  pct: (n) => Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%",
+};
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+
+function setMonth() {
+  const now = new Date();
+  document.getElementById("month").textContent = " · " + now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+async function checkHealth() {
+  const dot = document.getElementById("dot");
+  const txt = document.getElementById("health-text");
+  try {
+    const h = await getJSON("/healthz");
+    dot.classList.add("ok");
+    txt.textContent = "healthy · v" + h.version;
+  } catch (e) {
+    dot.classList.add("bad");
+    txt.textContent = "unhealthy";
+  }
+}
+
+function renderSummary(s) {
+  document.getElementById("tokens").textContent = fmt.num(s.total_tokens);
+  document.getElementById("tokens-sub").textContent =
+    fmt.num(s.total_input) + " in / " + fmt.num(s.total_output) + " out";
+  document.getElementById("cost").textContent = fmt.usd(s.total_cost_usd);
+  document.getElementById("cost-sub").textContent = "cache R " + fmt.num(s.total_cache_read) + " / W " + fmt.num(s.total_cache_write);
+  document.getElementById("sessions").textContent = fmt.num(s.session_count);
+  document.getElementById("util").textContent = fmt.pct(s.plan_utilisation_pct);
+  document.getElementById("util-sub").textContent = "of " + fmt.usd(s.plan_budget_usd) + " budget";
+  const bar = document.getElementById("util-bar");
+  const widthPct = Math.min(100, Number(s.plan_utilisation_pct || 0));
+  bar.style.width = widthPct + "%";
+  if (Number(s.plan_utilisation_pct || 0) >= 100) bar.classList.add("over");
+}
+
+function renderDaily(buckets) {
+  const recent = buckets.slice(-14);
+  const empty = document.getElementById("daily-empty");
+  const canvas = document.getElementById("daily-chart");
+  if (recent.length === 0) {
+    empty.hidden = false;
+    canvas.style.display = "none";
+    return;
+  }
+  empty.hidden = true;
+  canvas.style.display = "";
+  const labels = recent.map(b => b.bucket);
+  new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        { label: "Input", data: recent.map(b => b.input_tokens), backgroundColor: "#7c8cff" },
+        { label: "Output", data: recent.map(b => b.output_tokens), backgroundColor: "#4ade80" },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: "#e8e8ea" } },
+        tooltip: { mode: "index", intersect: false },
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: "#8a8a92" }, grid: { color: "#26262d" } },
+        y: { stacked: true, ticks: { color: "#8a8a92" }, grid: { color: "#26262d" } },
+      },
+    },
+  });
+}
+
+function renderProjects(rows) {
+  const body = document.getElementById("projects-body");
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No projects yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${escapeHtml(r.project_path || "(unknown)")}</td>
+      <td class="num">${fmt.num(r.session_count)}</td>
+      <td class="num">${fmt.num(r.total_tokens)}</td>
+      <td class="num">${fmt.usd(r.total_cost_usd)}</td>
+    </tr>`).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function main() {
+  setMonth();
+  checkHealth();
+  try {
+    const [summary, daily, projects] = await Promise.all([
+      getJSON("/v1/stats/summary"),
+      getJSON("/v1/stats/daily?days=30"),
+      getJSON("/v1/stats/projects?limit=20"),
+    ]);
+    renderSummary(summary);
+    renderDaily(daily);
+    renderProjects(projects);
+  } catch (e) {
+    console.error(e);
+  }
+}
+main();
+</script>
+</body>
+</html>
