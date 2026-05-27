@@ -14,7 +14,13 @@
       --accent: #7c8cff;
       --good: #4ade80;
       --bad: #f87171;
+      --warn: #fbbf24;
       --border: #26262d;
+
+      --m-opus: #f472b6;
+      --m-sonnet: #7c8cff;
+      --m-haiku: #4ade80;
+      --m-other: #94a3b8;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -26,15 +32,32 @@
     .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
     header {
       display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 24px;
+      margin-bottom: 16px;
     }
     h1 { margin: 0; font-size: 20px; font-weight: 600; }
     h1 .accent { color: var(--accent); }
     .month { color: var(--muted); margin-left: 12px; font-weight: 400; }
+    .header-right { display: flex; align-items: center; gap: 16px; }
     .health { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
     .dot.ok { background: var(--good); }
     .dot.bad { background: var(--bad); }
+
+    .toggle { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; }
+    .toggle input { appearance: none; width: 32px; height: 18px; background: var(--border); border-radius: 9px; position: relative; cursor: pointer; transition: background 0.15s; margin: 0; }
+    .toggle input:checked { background: var(--warn); }
+    .toggle input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text); transition: transform 0.15s; }
+    .toggle input:checked::after { transform: translateX(14px); }
+    .toggle.on { color: var(--warn); }
+
+    .mock-banner {
+      background: var(--warn); color: #1a1a1f;
+      padding: 8px 16px; border-radius: 8px; margin-bottom: 16px;
+      font-weight: 600; font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .mock-banner::before { content: "•"; font-size: 24px; line-height: 0; }
+
     .grid {
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
       margin-bottom: 24px;
@@ -51,6 +74,12 @@
     .progress .bar.over { background: var(--bad); }
     h2 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 12px 0; }
     .panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 24px; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .panel-head h2 { margin: 0; }
+    .seg { display: flex; gap: 4px; }
+    .seg button { background: var(--border); color: var(--muted); border: 0; padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+    .seg button.active { background: var(--accent); color: var(--text); }
+
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -58,14 +87,38 @@
     tr:last-child td { border-bottom: none; }
     .empty { color: var(--muted); padding: 32px; text-align: center; }
     .chart-wrap { height: 280px; position: relative; }
+    .chart-wrap.tall { height: 320px; }
+
+    .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+    .swatch.opus { background: var(--m-opus); }
+    .swatch.sonnet { background: var(--m-sonnet); }
+    .swatch.haiku { background: var(--m-haiku); }
+    .swatch.other { background: var(--m-other); }
+
+    .spike-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+    .spike-row:last-child { border-bottom: none; }
+    .pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .pill.low { background: rgba(74,222,128,0.15); color: var(--good); }
+    .pill.medium { background: rgba(251,191,36,0.15); color: var(--warn); }
+    .pill.high { background: rgba(248,113,113,0.18); color: var(--bad); }
+    .spike-meta { color: var(--muted); font-size: 12px; }
+    .spike-meta strong { color: var(--text); font-weight: 500; }
   </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1><span class="accent">session</span>-lens<span class="month" id="month"></span></h1>
-    <div class="health"><span class="dot" id="dot"></span><span id="health-text">checking...</span></div>
+    <div class="header-right">
+      <label class="toggle" id="mock-toggle" title="Render with deterministic mock data">
+        <input type="checkbox" id="mock-input" />
+        <span>Mock mode</span>
+      </label>
+      <div class="health"><span class="dot" id="dot"></span><span id="health-text">checking...</span></div>
+    </div>
   </header>
+
+  <div class="mock-banner" id="mock-banner" hidden>Mock mode — deterministic synthetic data, not real sessions</div>
 
   <div class="grid">
     <div class="card">
@@ -92,9 +145,51 @@
   </div>
 
   <div class="panel">
+    <div class="panel-head">
+      <h2>Tokens by hour</h2>
+      <div class="seg" id="hourly-range">
+        <button data-days="1">1d</button>
+        <button data-days="7" class="active">7d</button>
+        <button data-days="30">30d</button>
+      </div>
+    </div>
+    <div class="chart-wrap"><canvas id="hourly-chart"></canvas></div>
+    <div class="empty" id="hourly-empty" hidden>No hourly data in window.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Daily tokens by model</h2>
+    <div class="chart-wrap tall"><canvas id="bymodel-chart"></canvas></div>
+    <div class="empty" id="bymodel-empty" hidden>No model data yet.</div>
+    <table style="margin-top:12px">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="num">Sessions</th>
+          <th class="num">Input</th>
+          <th class="num">Output</th>
+          <th class="num">Cache R/W</th>
+          <th class="num">Tokens</th>
+          <th class="num">Cost</th>
+        </tr>
+      </thead>
+      <tbody id="bymodel-body">
+        <tr><td colspan="7" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
     <h2>Last 14 days</h2>
     <div class="chart-wrap"><canvas id="daily-chart"></canvas></div>
     <div class="empty" id="daily-empty" hidden>No sessions recorded yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Spikes</h2>
+    <div id="spikes-body">
+      <div class="empty" id="spikes-empty">No spikes detected.</div>
+    </div>
   </div>
 
   <div class="panel">
@@ -122,8 +217,19 @@ const fmt = {
   pct: (n) => Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "%",
 };
 
+const MODEL_COLOR = { opus: "#f472b6", sonnet: "#7c8cff", haiku: "#4ade80", other: "#94a3b8" };
+const MODEL_ORDER = ["opus", "sonnet", "haiku", "other"];
+
+// Chart instances kept so we can destroy/replace cleanly on refresh.
+const charts = { hourly: null, byModel: null, daily: null };
+
 async function getJSON(url) {
   const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(url + " -> " + r.status);
   return r.json();
 }
@@ -138,12 +244,31 @@ async function checkHealth() {
   const txt = document.getElementById("health-text");
   try {
     const h = await getJSON("/healthz");
-    dot.classList.add("ok");
+    dot.classList.remove("bad"); dot.classList.add("ok");
     txt.textContent = "healthy · v" + h.version;
+    return h;
   } catch (e) {
-    dot.classList.add("bad");
+    dot.classList.remove("ok"); dot.classList.add("bad");
     txt.textContent = "unhealthy";
+    return null;
   }
+}
+
+function applyMockBanner(on) {
+  document.getElementById("mock-banner").hidden = !on;
+  document.getElementById("mock-toggle").classList.toggle("on", on);
+  document.getElementById("mock-input").checked = on;
+}
+
+async function setMockMode(on) {
+  await postJSON("/v1/mode", { mock: !!on });
+  localStorage.setItem("session-lens-mock", on ? "1" : "0");
+  applyMockBanner(on);
+  await loadAll();
+}
+
+function destroyChart(key) {
+  if (charts[key]) { charts[key].destroy(); charts[key] = null; }
 }
 
 function renderSummary(s) {
@@ -158,43 +283,120 @@ function renderSummary(s) {
   const bar = document.getElementById("util-bar");
   const widthPct = Math.min(100, Number(s.plan_utilisation_pct || 0));
   bar.style.width = widthPct + "%";
-  if (Number(s.plan_utilisation_pct || 0) >= 100) bar.classList.add("over");
+  bar.classList.toggle("over", Number(s.plan_utilisation_pct || 0) >= 100);
 }
 
 function renderDaily(buckets) {
-  const recent = buckets.slice(-14);
+  destroyChart("daily");
+  const recent = (buckets || []).slice(-14);
   const empty = document.getElementById("daily-empty");
   const canvas = document.getElementById("daily-chart");
   if (recent.length === 0) {
-    empty.hidden = false;
-    canvas.style.display = "none";
-    return;
+    empty.hidden = false; canvas.style.display = "none"; return;
   }
-  empty.hidden = true;
-  canvas.style.display = "";
-  const labels = recent.map(b => b.bucket);
-  new Chart(canvas, {
+  empty.hidden = true; canvas.style.display = "";
+  charts.daily = new Chart(canvas, {
     type: "bar",
     data: {
-      labels,
+      labels: recent.map(b => b.bucket),
       datasets: [
         { label: "Input", data: recent.map(b => b.input_tokens), backgroundColor: "#7c8cff" },
         { label: "Output", data: recent.map(b => b.output_tokens), backgroundColor: "#4ade80" },
       ],
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: "#e8e8ea" } },
-        tooltip: { mode: "index", intersect: false },
-      },
-      scales: {
-        x: { stacked: true, ticks: { color: "#8a8a92" }, grid: { color: "#26262d" } },
-        y: { stacked: true, ticks: { color: "#8a8a92" }, grid: { color: "#26262d" } },
-      },
-    },
+    options: chartOpts({ stacked: true }),
   });
+}
+
+function renderByModel(resp) {
+  destroyChart("byModel");
+  const daily = (resp && resp.daily) || [];
+  const totals = (resp && resp.totals) || [];
+  const empty = document.getElementById("bymodel-empty");
+  const canvas = document.getElementById("bymodel-chart");
+
+  if (daily.length === 0) {
+    empty.hidden = false; canvas.style.display = "none";
+  } else {
+    empty.hidden = true; canvas.style.display = "";
+    // Build a dataset per family present anywhere.
+    const families = new Set();
+    daily.forEach(d => Object.keys(d.totals || {}).forEach(k => families.add(k)));
+    const ordered = MODEL_ORDER.filter(f => families.has(f));
+    const datasets = ordered.map(f => ({
+      label: f, backgroundColor: MODEL_COLOR[f],
+      data: daily.map(d => Number((d.totals || {})[f] || 0)),
+    }));
+    charts.byModel = new Chart(canvas, {
+      type: "bar",
+      data: { labels: daily.map(d => d.bucket), datasets },
+      options: chartOpts({ stacked: true }),
+    });
+  }
+
+  const body = document.getElementById("bymodel-body");
+  if (totals.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">No model totals.</td></tr>';
+    return;
+  }
+  body.innerHTML = totals.map(m => `
+    <tr>
+      <td><span class="swatch ${m.family}"></span>${escapeHtml(m.family)}</td>
+      <td class="num">${fmt.num(m.session_count)}</td>
+      <td class="num">${fmt.num(m.input_tokens)}</td>
+      <td class="num">${fmt.num(m.output_tokens)}</td>
+      <td class="num">${fmt.num(m.cache_read_tokens)} / ${fmt.num(m.cache_write_tokens)}</td>
+      <td class="num">${fmt.num(m.total_tokens)}</td>
+      <td class="num">${fmt.usd(m.total_cost_usd)}</td>
+    </tr>`).join("");
+}
+
+function renderHourly(buckets) {
+  destroyChart("hourly");
+  const empty = document.getElementById("hourly-empty");
+  const canvas = document.getElementById("hourly-chart");
+  if (!buckets || buckets.length === 0) {
+    empty.hidden = false; canvas.style.display = "none"; return;
+  }
+  empty.hidden = true; canvas.style.display = "";
+  charts.hourly = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: buckets.map(b => b.bucket),
+      datasets: [{
+        label: "Tokens / hr",
+        data: buckets.map(b => b.total_tokens),
+        borderColor: "#7c8cff",
+        backgroundColor: "rgba(124,140,255,0.18)",
+        tension: 0.25, fill: true, pointRadius: 0,
+      }],
+    },
+    options: chartOpts({ stacked: false }),
+  });
+}
+
+function renderSpikes(rows) {
+  const body = document.getElementById("spikes-body");
+  const empty = document.getElementById("spikes-empty");
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<div class="empty">No spikes detected.</div>';
+    return;
+  }
+  const limited = rows.slice(0, 20);
+  body.innerHTML = limited.map(s => {
+    const kind = s.kind === "session" ? "Session" : "Trend day";
+    const value = s.kind === "session" ? fmt.usd(s.value) : fmt.num(s.value) + " tok";
+    const baseline = s.kind === "session" ? fmt.usd(s.baseline) : fmt.num(s.baseline) + " tok";
+    const proj = s.project ? ` · <strong>${escapeHtml(s.project)}</strong>` : "";
+    return `
+      <div class="spike-row">
+        <span class="pill ${escapeHtml(s.severity)}">${escapeHtml(s.severity)}</span>
+        <div class="spike-meta">${kind} · ${escapeHtml(s.timestamp)}${proj}</div>
+        <div class="spike-meta"><strong>${value}</strong> vs ${baseline}</div>
+        <div class="spike-meta">${Number(s.ratio).toFixed(1)}x</div>
+      </div>`;
+  }).join("");
+  empty.hidden = true;
 }
 
 function renderProjects(rows) {
@@ -212,25 +414,97 @@ function renderProjects(rows) {
     </tr>`).join("");
 }
 
+function chartOpts(opts) {
+  const stacked = !!opts.stacked;
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#e8e8ea" } },
+      tooltip: { mode: "index", intersect: false },
+    },
+    scales: {
+      x: { stacked, ticks: { color: "#8a8a92", maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { color: "#26262d" } },
+      y: { stacked, ticks: { color: "#8a8a92" }, grid: { color: "#26262d" } },
+    },
+  };
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function main() {
-  setMonth();
-  checkHealth();
+let hourlyDays = 7;
+
+async function loadAll() {
   try {
-    const [summary, daily, projects] = await Promise.all([
+    const [summary, daily, byModel, hourly, spikes, projects] = await Promise.all([
       getJSON("/v1/stats/summary"),
       getJSON("/v1/stats/daily?days=30"),
+      getJSON("/v1/stats/by-model?days=14"),
+      getJSON("/v1/stats/hourly?days=" + hourlyDays),
+      getJSON("/v1/stats/spikes"),
       getJSON("/v1/stats/projects?limit=20"),
     ]);
     renderSummary(summary);
+    renderHourly(hourly);
+    renderByModel(byModel);
     renderDaily(daily);
+    renderSpikes(spikes);
     renderProjects(projects);
   } catch (e) {
     console.error(e);
   }
+}
+
+function wireToggles() {
+  // Mock toggle.
+  const input = document.getElementById("mock-input");
+  input.addEventListener("change", () => setMockMode(input.checked));
+
+  // Hourly range buttons.
+  document.querySelectorAll("#hourly-range button").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      document.querySelectorAll("#hourly-range button").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      hourlyDays = Number(btn.dataset.days || 7);
+      try {
+        const hourly = await getJSON("/v1/stats/hourly?days=" + hourlyDays);
+        renderHourly(hourly);
+      } catch (e) { console.error(e); }
+    });
+  });
+}
+
+async function syncInitialMock() {
+  // Server is the source of truth (env var may have set MOCK_MODE=1). Sync
+  // from server first, then let localStorage override if the user previously
+  // toggled it.
+  let serverMock = false;
+  try {
+    const r = await getJSON("/v1/mode");
+    serverMock = !!r.mock;
+  } catch (_) {}
+
+  const stored = localStorage.getItem("session-lens-mock");
+  if (stored === "0" || stored === "1") {
+    const desired = stored === "1";
+    if (desired !== serverMock) {
+      try { await postJSON("/v1/mode", { mock: desired }); } catch (_) {}
+    }
+    applyMockBanner(desired);
+  } else {
+    applyMockBanner(serverMock);
+  }
+}
+
+async function main() {
+  setMonth();
+  wireToggles();
+  await checkHealth();
+  await syncInitialMock();
+  await loadAll();
 }
 main();
 </script>
