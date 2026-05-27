@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
+CREATE INDEX IF NOT EXISTS idx_sessions_project_ended_at ON sessions(project_path, ended_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_model_ended_at ON sessions(model, ended_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
 `
 
 // Session is the persisted row plus identity.

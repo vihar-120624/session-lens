@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,9 +88,94 @@ func TestIndexesPresent(t *testing.T) {
 		}
 		found[name] = true
 	}
-	for _, want := range []string{"idx_sessions_ended_at", "idx_sessions_project"} {
+	for _, want := range []string{
+		"idx_sessions_ended_at",
+		"idx_sessions_project",
+		"idx_sessions_project_ended_at",
+		"idx_sessions_model_ended_at",
+		"idx_sessions_created_at",
+	} {
 		if !found[want] {
 			t.Errorf("missing index %q (found: %v)", want, found)
 		}
+	}
+}
+
+// TestExplainQueryPlanUsesIndex verifies that the three most performance-critical
+// aggregation queries use an index rather than a bare SCAN TABLE. SQLite's
+// EXPLAIN QUERY PLAN returns a row whose "detail" column starts with
+// "SEARCH" (index seek) when an index is used, or "SCAN" without an index name
+// when performing a full-table scan.
+func TestExplainQueryPlanUsesIndex(t *testing.T) {
+	conn, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer conn.Close()
+
+	cases := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name: "MonthSummary (ended_at range)",
+			query: `EXPLAIN QUERY PLAN
+SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+       COALESCE(SUM(total_cost_usd),0), COUNT(1)
+FROM sessions WHERE ended_at >= ?`,
+			args: []any{"2026-01-01T00:00:00Z"},
+		},
+		{
+			name: "Daily buckets (ended_at range + group by date)",
+			query: `EXPLAIN QUERY PLAN
+SELECT substr(ended_at, 1, 10) AS bucket,
+       COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+       COALESCE(SUM(total_cost_usd),0), COUNT(1)
+FROM sessions WHERE ended_at >= ?
+GROUP BY bucket ORDER BY bucket ASC`,
+			args: []any{"2026-01-01T00:00:00Z"},
+		},
+		{
+			name: "ByModel (ended_at range with model read)",
+			query: `EXPLAIN QUERY PLAN
+SELECT ended_at, COALESCE(model,''),
+       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+       total_cost_usd
+FROM sessions WHERE ended_at >= ?`,
+			args: []any{"2026-01-01T00:00:00Z"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := conn.Query(tc.query, tc.args...)
+			if err != nil {
+				t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+			}
+			defer rows.Close()
+
+			usesIndex := false
+			for rows.Next() {
+				// SQLite EXPLAIN QUERY PLAN columns: id, parent, notused, detail
+				var id, parent, notused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+					t.Fatalf("scan plan row: %v", err)
+				}
+				// "SEARCH sessions USING INDEX ..." → index is used.
+				if strings.Contains(detail, "USING INDEX") || strings.Contains(detail, "USING COVERING INDEX") {
+					usesIndex = true
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("rows err: %v", err)
+			}
+			if !usesIndex {
+				t.Errorf("query %q: no index used (EXPLAIN QUERY PLAN shows full table scan)", tc.name)
+			}
+		})
 	}
 }
