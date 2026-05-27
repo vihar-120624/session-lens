@@ -68,6 +68,44 @@ func New(cfg Config) http.Handler {
 		handleCreateSession(w, r, cfg)
 	})
 
+	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		limit := intParam(r, "limit", 20)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.ListSessions(limit))
+			return
+		}
+		rows, err := db.ListSessions(cfg.DB, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	})
+
+	mux.HandleFunc("GET /v1/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if isMock(r, mode) {
+			s, ok := dataset.GetSession(id)
+			if !ok {
+				writeError(w, http.StatusNotFound, fmt.Errorf("session %q not found", id))
+				return
+			}
+			writeJSON(w, http.StatusOK, s.ToDBSession())
+			return
+		}
+		s, err := db.GetSession(cfg.DB, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, fmt.Errorf("session %q not found", id))
+				return
+			}
+			// GetSession wraps the error; check the underlying cause via string match.
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s)
+	})
+
 	mux.HandleFunc("GET /v1/stats/summary", func(w http.ResponseWriter, r *http.Request) {
 		if isMock(r, mode) {
 			writeJSON(w, http.StatusOK, dataset.Summary(cfg.PlanBudgetUSD))

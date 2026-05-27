@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/viharshah/session-lens/internal/db"
 	"github.com/viharshah/session-lens/internal/stats"
 	"github.com/viharshah/session-lens/internal/transcript"
 )
@@ -154,6 +155,49 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(out)
+}
+
+// ToDBSession converts a mock Session to the db.Session wire format.
+func (s Session) ToDBSession() db.Session {
+	return db.Session{
+		ID:               s.ID,
+		ProjectPath:      s.ProjectPath,
+		EndedAt:          s.EndedAt.UTC().Format(time.RFC3339),
+		InputTokens:      s.InputTokens,
+		OutputTokens:     s.OutputTokens,
+		CacheReadTokens:  s.CacheReadTokens,
+		CacheWriteTokens: s.CacheWriteTokens,
+		TotalCostUSD:     s.TotalCostUSD,
+		Model:            s.Model,
+	}
+}
+
+// GetSession returns the mock session with the given id, or (Session{}, false)
+// if no such id exists in the dataset.
+func (d Dataset) GetSession(id string) (Session, bool) {
+	for _, s := range d.Sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return Session{}, false
+}
+
+// ListSessions returns the most-recent mock sessions ordered by EndedAt DESC,
+// capped at limit (0 → default 20, max 100).
+func (d Dataset) ListSessions(limit int) []db.Session {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	// Sessions are stored oldest-first; iterate in reverse for DESC order.
+	out := make([]db.Session, 0, limit)
+	for i := len(d.Sessions) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, d.Sessions[i].ToDBSession())
+	}
+	return out
 }
 
 // --- Aggregation helpers that mirror the DB-backed stats.* functions ---

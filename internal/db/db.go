@@ -125,6 +125,42 @@ ON CONFLICT(id) DO UPDATE SET
 	return out, exists == 0, nil
 }
 
+// ListSessions returns the most-recent sessions ordered by ended_at DESC.
+// limit is capped at 100; pass 0 to get the default of 20.
+func ListSessions(conn *sql.DB, limit int) ([]Session, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	const stmt = `
+SELECT id, COALESCE(project_path,''), COALESCE(started_at,''), ended_at,
+       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+       total_cost_usd, COALESCE(model,''), turns, COALESCE(raw_payload,''),
+       created_at, updated_at
+FROM sessions ORDER BY ended_at DESC LIMIT ?`
+	rows, err := conn.Query(stmt, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		var s Session
+		if err := rows.Scan(
+			&s.ID, &s.ProjectPath, &s.StartedAt, &s.EndedAt,
+			&s.InputTokens, &s.OutputTokens, &s.CacheReadTokens, &s.CacheWriteTokens,
+			&s.TotalCostUSD, &s.Model, &s.Turns, &s.RawPayload,
+			&s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // GetSession fetches a single row by id.
 func GetSession(conn *sql.DB, id string) (Session, error) {
 	const stmt = `

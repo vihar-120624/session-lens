@@ -103,6 +103,18 @@
     .pill.high { background: rgba(248,113,113,0.18); color: var(--bad); }
     .spike-meta { color: var(--muted); font-size: 12px; }
     .spike-meta strong { color: var(--text); font-weight: 500; }
+
+    /* Session drill-down */
+    .session-link { color: var(--accent); text-decoration: none; font-family: monospace; font-size: 12px; }
+    .session-link:hover { text-decoration: underline; }
+    #session-detail { display: none; }
+    #session-detail.visible { display: block; }
+    .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
+    .detail-item .dl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .detail-item .dv { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .detail-item .dv.mono { font-family: monospace; font-size: 13px; font-weight: 400; word-break: break-all; }
+    .back-btn { background: var(--border); color: var(--muted); border: 0; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; margin-bottom: 12px; }
+    .back-btn:hover { color: var(--text); }
   </style>
 </head>
 <body>
@@ -208,6 +220,33 @@
       </tbody>
     </table>
   </div>
+
+  <div class="panel">
+    <h2>Recent sessions</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Project</th>
+          <th>Model</th>
+          <th>Ended</th>
+          <th class="num">Turns</th>
+          <th class="num">Cost</th>
+        </tr>
+      </thead>
+      <tbody id="sessions-body">
+        <tr><td colspan="6" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Session detail panel — shown when a session row is clicked -->
+  <div class="panel" id="session-detail">
+    <button class="back-btn" id="detail-back">&#8592; Back</button>
+    <h2 id="detail-title">Session</h2>
+    <div class="detail-grid" id="detail-grid"></div>
+    <div id="detail-cost-breakdown" style="margin-top:8px"></div>
+  </div>
 </div>
 
 <script>
@@ -264,6 +303,8 @@ async function setMockMode(on) {
   await postJSON("/v1/mode", { mock: !!on });
   localStorage.setItem("session-lens-mock", on ? "1" : "0");
   applyMockBanner(on);
+  hideSessionDetail();
+  window.location.hash = "";
   await loadAll();
 }
 
@@ -414,6 +455,103 @@ function renderProjects(rows) {
     </tr>`).join("");
 }
 
+function modelFamily(model) {
+  const m = (model || "").toLowerCase();
+  if (m.includes("opus")) return "opus";
+  if (m.includes("sonnet")) return "sonnet";
+  if (m.includes("haiku")) return "haiku";
+  return "other";
+}
+
+function renderSessions(rows) {
+  const body = document.getElementById("sessions-body");
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No sessions yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const fam = modelFamily(r.model);
+    return `
+    <tr>
+      <td><a class="session-link" href="#session/${escapeHtml(r.id)}">${escapeHtml(r.id)}</a></td>
+      <td>${escapeHtml(r.project_path || "(unknown)")}</td>
+      <td><span class="swatch ${fam}"></span>${escapeHtml(r.model || "(unknown)")}</td>
+      <td>${escapeHtml((r.ended_at || "").replace("T", " ").replace("Z", " UTC"))}</td>
+      <td class="num">${fmt.num(r.turns)}</td>
+      <td class="num">${fmt.usd(r.total_cost_usd)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function showSessionDetail(s) {
+  const panel = document.getElementById("session-detail");
+  const title = document.getElementById("detail-title");
+  const grid = document.getElementById("detail-grid");
+  const breakdown = document.getElementById("detail-cost-breakdown");
+
+  title.textContent = "Session · " + s.id;
+
+  const fam = modelFamily(s.model);
+  const totalTokens = Number(s.input_tokens||0) + Number(s.output_tokens||0) + Number(s.cache_read_tokens||0) + Number(s.cache_write_tokens||0);
+
+  grid.innerHTML = [
+    { l: "ID", v: s.id, mono: true },
+    { l: "Model", v: `<span class="swatch ${fam}"></span>${escapeHtml(s.model || "(unknown)")}` },
+    { l: "Project", v: escapeHtml(s.project_path || "(unknown)"), mono: true },
+    { l: "Started", v: escapeHtml((s.started_at || "—").replace("T", " ").replace("Z", " UTC")) },
+    { l: "Ended", v: escapeHtml((s.ended_at || "—").replace("T", " ").replace("Z", " UTC")) },
+    { l: "Turns", v: fmt.num(s.turns) },
+    { l: "Total tokens", v: fmt.num(totalTokens) },
+    { l: "Total cost", v: fmt.usd(s.total_cost_usd) },
+  ].map(item => `
+    <div class="detail-item">
+      <div class="dl">${item.l}</div>
+      <div class="dv${item.mono ? " mono" : ""}">${item.v}</div>
+    </div>`).join("");
+
+  breakdown.innerHTML = `
+    <table style="width:auto">
+      <thead>
+        <tr>
+          <th>Token type</th>
+          <th class="num">Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Input</td><td class="num">${fmt.num(s.input_tokens)}</td></tr>
+        <tr><td>Output</td><td class="num">${fmt.num(s.output_tokens)}</td></tr>
+        <tr><td>Cache read</td><td class="num">${fmt.num(s.cache_read_tokens)}</td></tr>
+        <tr><td>Cache write</td><td class="num">${fmt.num(s.cache_write_tokens)}</td></tr>
+      </tbody>
+    </table>`;
+
+  panel.classList.add("visible");
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function hideSessionDetail() {
+  document.getElementById("session-detail").classList.remove("visible");
+}
+
+async function handleHashChange() {
+  const hash = window.location.hash;
+  const m = hash.match(/^#session\/(.+)$/);
+  if (!m) {
+    hideSessionDetail();
+    return;
+  }
+  const id = decodeURIComponent(m[1]);
+  const isMockNow = document.getElementById("mock-input").checked;
+  const qs = isMockNow ? "?mock=1" : "";
+  try {
+    const s = await getJSON("/v1/sessions/" + encodeURIComponent(id) + qs);
+    showSessionDetail(s);
+  } catch (e) {
+    console.error("session detail:", e);
+    hideSessionDetail();
+  }
+}
+
 function chartOpts(opts) {
   const stacked = !!opts.stacked;
   return {
@@ -439,13 +577,14 @@ let hourlyDays = 7;
 
 async function loadAll() {
   try {
-    const [summary, daily, byModel, hourly, spikes, projects] = await Promise.all([
+    const [summary, daily, byModel, hourly, spikes, projects, sessions] = await Promise.all([
       getJSON("/v1/stats/summary"),
       getJSON("/v1/stats/daily?days=30"),
       getJSON("/v1/stats/by-model?days=14"),
       getJSON("/v1/stats/hourly?days=" + hourlyDays),
       getJSON("/v1/stats/spikes"),
       getJSON("/v1/stats/projects?limit=20"),
+      getJSON("/v1/sessions?limit=20"),
     ]);
     renderSummary(summary);
     renderHourly(hourly);
@@ -453,6 +592,7 @@ async function loadAll() {
     renderDaily(daily);
     renderSpikes(spikes);
     renderProjects(projects);
+    renderSessions(sessions);
   } catch (e) {
     console.error(e);
   }
@@ -502,9 +642,32 @@ async function syncInitialMock() {
 async function main() {
   setMonth();
   wireToggles();
+
+  // Session detail: delegate clicks on #session/* links in the sessions table.
+  document.getElementById("sessions-body").addEventListener("click", (e) => {
+    const a = e.target.closest("a.session-link");
+    if (!a) return;
+    e.preventDefault();
+    window.location.hash = a.getAttribute("href").slice(1);
+  });
+
+  // Back button clears the detail panel and removes the fragment.
+  document.getElementById("detail-back").addEventListener("click", () => {
+    window.location.hash = "";
+    hideSessionDetail();
+  });
+
+  // Respond to hash changes (browser back/forward, direct link).
+  window.addEventListener("hashchange", handleHashChange);
+
   await checkHealth();
   await syncInitialMock();
   await loadAll();
+
+  // Handle a fragment present on initial load.
+  if (window.location.hash.startsWith("#session/")) {
+    await handleHashChange();
+  }
 }
 main();
 </script>
