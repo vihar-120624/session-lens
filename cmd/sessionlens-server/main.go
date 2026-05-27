@@ -34,10 +34,12 @@ func main() {
 	defer conn.Close()
 
 	staticDir := getenv("STATIC_DIR", "./web")
+	mockDefault := os.Getenv("MOCK_MODE") == "1"
 	handler := server.New(server.Config{
 		DB:            conn,
 		StaticDir:     staticDir,
 		PlanBudgetUSD: planBudget,
+		MockDefault:   mockDefault,
 	})
 
 	srv := &http.Server{
@@ -50,7 +52,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("session-lens server listening on http://127.0.0.1:%s (db=%s, budget=$%.2f)", port, dbPath, planBudget)
+		log.Printf("session-lens server listening on http://127.0.0.1:%s (db=%s, budget=$%.2f, mock=%v)", port, dbPath, planBudget, mockDefault)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server: %v", err)
 		}

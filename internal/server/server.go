@@ -11,34 +11,68 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/viharshah/session-lens/internal/db"
+	"github.com/viharshah/session-lens/internal/mock"
 	"github.com/viharshah/session-lens/internal/stats"
 )
 
 // Version is reported by /healthz.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Config holds the runtime knobs for the server.
 type Config struct {
 	DB            *sql.DB
 	StaticDir     string
 	PlanBudgetUSD float64
+	MockDefault   bool // initial state of mock mode (driven by env var)
 }
+
+// modeFlag holds a thread-safe bool; UI toggles it via POST /v1/mode.
+type modeFlag struct{ on atomic.Bool }
+
+func (m *modeFlag) Set(v bool) { m.on.Store(v) }
+func (m *modeFlag) Get() bool  { return m.on.Load() }
 
 // New builds the http handler for the server.
 func New(cfg Config) http.Handler {
 	mux := http.NewServeMux()
+	mode := &modeFlag{}
+	mode.Set(cfg.MockDefault)
+	// Cache the mock dataset once per process: it's deterministic.
+	dataset := mock.Generate()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version, "mock": mode.Get()})
+	})
+
+	mux.HandleFunc("GET /v1/mode", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"mock": mode.Get()})
+	})
+	mux.HandleFunc("POST /v1/mode", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Mock bool `json:"mock"`
+		}
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid json: %w", err))
+			return
+		}
+		mode.Set(body.Mock)
+		writeJSON(w, http.StatusOK, map[string]any{"mock": mode.Get()})
 	})
 
 	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		handleCreateSession(w, r, cfg)
 	})
+
 	mux.HandleFunc("GET /v1/stats/summary", func(w http.ResponseWriter, r *http.Request) {
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Summary(cfg.PlanBudgetUSD))
+			return
+		}
 		s, err := stats.MonthSummary(cfg.DB, cfg.PlanBudgetUSD)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -48,6 +82,10 @@ func New(cfg Config) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/stats/daily", func(w http.ResponseWriter, r *http.Request) {
 		days := intParam(r, "days", 30)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Daily(days))
+			return
+		}
 		out, err := stats.Daily(cfg.DB, days)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -57,6 +95,10 @@ func New(cfg Config) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/stats/weekly", func(w http.ResponseWriter, r *http.Request) {
 		weeks := intParam(r, "weeks", 12)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Weekly(weeks))
+			return
+		}
 		out, err := stats.Weekly(cfg.DB, weeks)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -66,7 +108,50 @@ func New(cfg Config) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/stats/projects", func(w http.ResponseWriter, r *http.Request) {
 		limit := intParam(r, "limit", 20)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Projects(limit))
+			return
+		}
 		out, err := stats.Projects(cfg.DB, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("GET /v1/stats/hourly", func(w http.ResponseWriter, r *http.Request) {
+		days := intParam(r, "days", 7)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Hourly(days))
+			return
+		}
+		out, err := stats.Hourly(cfg.DB, days)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("GET /v1/stats/by-model", func(w http.ResponseWriter, r *http.Request) {
+		days := intParam(r, "days", 14)
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.ByModel(days))
+			return
+		}
+		out, err := stats.ByModel(cfg.DB, days)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("GET /v1/stats/spikes", func(w http.ResponseWriter, r *http.Request) {
+		spikeCfg := stats.DefaultSpikeConfig()
+		if isMock(r, mode) {
+			writeJSON(w, http.StatusOK, dataset.Spikes(spikeCfg))
+			return
+		}
+		out, err := stats.Spikes(cfg.DB, spikeCfg)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -84,6 +169,16 @@ func New(cfg Config) http.Handler {
 	}
 
 	return logMiddleware(mux)
+}
+
+// isMock returns true if the request should be served mock data — either
+// because the server-side flag is on or the caller passed `?mock=1`.
+func isMock(r *http.Request, flag *modeFlag) bool {
+	if flag.Get() {
+		return true
+	}
+	q := r.URL.Query().Get("mock")
+	return q == "1" || q == "true"
 }
 
 // SessionEvent is the POST body for /v1/sessions.
