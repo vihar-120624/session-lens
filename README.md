@@ -13,8 +13,9 @@ session-lens/
 │   └── sessionlens-hook/main.go     # Claude Code Stop-hook entrypoint
 ├── internal/
 │   ├── db/         # sqlite connection, schema bootstrap, UPSERT helpers
-│   ├── stats/      # summary / daily / weekly / projects queries
+│   ├── stats/      # summary / daily / weekly / hourly / by-model / spike queries
 │   ├── transcript/ # JSONL parser + per-family pricing table
+│   ├── mock/       # deterministic mock dataset + parallel aggregations
 │   └── server/     # http.ServeMux routes and JSON handlers
 ├── web/
 │   └── index.html  # vanilla HTML/JS + Chart.js dashboard
@@ -31,7 +32,11 @@ go build -o bin/sessionlens-server ./cmd/sessionlens-server && go build -o bin/s
 
 Then open <http://127.0.0.1:7821>.
 
-Configuration is via `.env` (see `.env.example`): `PORT`, `DB_PATH`, `PLAN_BUDGET_USD`.
+Configuration is via `.env` (see `.env.example`): `PORT`, `DB_PATH`, `PLAN_BUDGET_USD`, `MOCK_MODE` (`1` to boot with the deterministic mock dataset).
+
+## Mock mode
+
+The dashboard ships with a deterministic synthetic dataset useful for screenshots and visual regression. Flip it from the top-right toggle in the UI, or start the server with `MOCK_MODE=1`. The UI persists your last choice to `localStorage`. While mock mode is on a yellow banner is displayed and all aggregate endpoints serve the synthetic data; the `/v1/sessions` write path is unaffected.
 
 ## Hook setup
 
@@ -53,11 +58,18 @@ The binary is fully static (pure-Go SQLite driver, no CGO) — no runtime needed
 
 ## API reference
 
-- `GET  /healthz`               — `{ok, version}`
-- `POST /v1/sessions`           — UPSERT a SessionEvent (201 insert / 200 update)
-- `GET  /v1/stats/summary`      — current calendar-month rollup + plan utilisation
-- `GET  /v1/stats/daily?days=N` — daily buckets, last N days (cap 365)
-- `GET  /v1/stats/weekly?weeks=N` — ISO-week buckets
-- `GET  /v1/stats/projects?limit=N` — top-N projects by cost
-- `GET  /`                      — dashboard UI
-- `GET  /static/*`              — static asset mount
+- `GET  /healthz`                       — `{ok, version, mock}`
+- `GET  /v1/mode`                       — `{mock}` — read current mode
+- `POST /v1/mode`                       — `{mock: bool}` — flip mock mode
+- `POST /v1/sessions`                   — UPSERT a SessionEvent (201 insert / 200 update)
+- `GET  /v1/stats/summary`              — current calendar-month rollup + plan utilisation
+- `GET  /v1/stats/daily?days=N`         — daily buckets, last N days (cap 365)
+- `GET  /v1/stats/weekly?weeks=N`       — ISO-week buckets
+- `GET  /v1/stats/hourly?days=N`        — hourly buckets, last N days (cap 90, default 7)
+- `GET  /v1/stats/by-model?days=N`      — per-model totals + per-day stacked breakdown
+- `GET  /v1/stats/projects?limit=N`     — top-N projects by cost
+- `GET  /v1/stats/spikes`               — recent session and trend-day anomalies
+- `GET  /`                              — dashboard UI
+- `GET  /static/*`                      — static asset mount
+
+Every `GET /v1/stats/*` endpoint also honours `?mock=1` as a request-scoped override.
