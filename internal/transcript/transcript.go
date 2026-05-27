@@ -1,0 +1,105 @@
+// Package transcript parses Claude Code session transcript JSONL files and
+// aggregates per-session token usage for billing/reporting.
+package transcript
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+
+// Summary is the per-session aggregate computed from a transcript file.
+type Summary struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	TotalTokens      int64
+	TotalCostUSD     float64
+	Model            string
+	Turns            int
+	StartedAt        time.Time
+	EndedAt          time.Time
+}
+
+// rawLine is the minimal subset of a transcript JSONL line we care about.
+type rawLine struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Message   *struct {
+		Model string `json:"model"`
+		Usage *struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+// ParseFile opens path and aggregates usage. Malformed JSON lines are skipped.
+func ParseFile(path string) (*Summary, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open transcript: %w", err)
+	}
+	defer f.Close()
+	return Parse(f)
+}
+
+// Parse reads JSONL from r and aggregates usage. Returns a non-nil Summary
+// even when the file is empty; only IO errors are returned.
+func Parse(r io.Reader) (*Summary, error) {
+	s := &Summary{}
+	scanner := bufio.NewScanner(r)
+	// Allow very large lines (transcript messages can be big).
+	const maxLine = 16 * 1024 * 1024
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, maxLine)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rl rawLine
+		if err := json.Unmarshal(line, &rl); err != nil {
+			// Malformed JSON line: ignore and continue.
+			continue
+		}
+		// Track timestamps across all line types (parse best-effort).
+		if rl.Timestamp != "" {
+			if t, err := time.Parse(time.RFC3339Nano, rl.Timestamp); err == nil {
+				if s.StartedAt.IsZero() || t.Before(s.StartedAt) {
+					s.StartedAt = t
+				}
+				if t.After(s.EndedAt) {
+					s.EndedAt = t
+				}
+			}
+		}
+		if rl.Type != "assistant" || rl.Message == nil {
+			continue
+		}
+		s.Turns++
+		if rl.Message.Model != "" {
+			s.Model = rl.Message.Model
+		}
+		if rl.Message.Usage != nil {
+			s.InputTokens += rl.Message.Usage.InputTokens
+			s.OutputTokens += rl.Message.Usage.OutputTokens
+			s.CacheReadTokens += rl.Message.Usage.CacheReadInputTokens
+			s.CacheWriteTokens += rl.Message.Usage.CacheCreationInputTokens
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan transcript: %w", err)
+	}
+
+	s.TotalTokens = s.InputTokens + s.OutputTokens + s.CacheReadTokens + s.CacheWriteTokens
+	s.TotalCostUSD = ComputeCost(s.Model, s.InputTokens, s.OutputTokens, s.CacheReadTokens, s.CacheWriteTokens)
+	return s, nil
+}
