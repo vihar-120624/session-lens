@@ -273,3 +273,24 @@ ORDER BY day ASC
 
 	return DetectSpikes(sessions, days, cfg), nil
 }
+
+// RollingAvgCostUSD returns the average total_cost_usd of sessions that ended
+// in the 7 days prior to today (i.e. excluding today). Returns 0 if there are
+// no qualifying rows.
+func RollingAvgCostUSD(conn *sql.DB) (float64, error) {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	sevenDaysAgo := today.AddDate(0, 0, -7)
+
+	const q = `
+SELECT COALESCE(AVG(total_cost_usd), 0)
+FROM sessions
+WHERE ended_at >= ?
+  AND ended_at < ?
+`
+	var avg float64
+	err := conn.QueryRow(q, sevenDaysAgo.Format(time.RFC3339), today.Format(time.RFC3339)).Scan(&avg)
+	if err != nil {
+		return 0, fmt.Errorf("rolling avg cost: %w", err)
+	}
+	return avg, nil
+}

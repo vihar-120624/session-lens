@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/viharshah/session-lens/internal/alerter"
 	"github.com/viharshah/session-lens/internal/db"
 	"github.com/viharshah/session-lens/internal/mock"
 	"github.com/viharshah/session-lens/internal/stats"
@@ -33,8 +34,9 @@ type Config struct {
 	DB            *sql.DB
 	StaticDir     string
 	PlanBudgetUSD float64
-	MockDefault   bool // initial state of mock mode (driven by env var)
-	Hub           *Hub // SSE broadcast hub; if nil a no-op hub is used
+	MockDefault   bool            // initial state of mock mode (driven by env var)
+	Hub           *Hub            // SSE broadcast hub; if nil a no-op hub is used
+	Notifier      alerter.Notifier // desktop notifications; if nil uses alerter.Default()
 }
 
 // modeFlag holds a thread-safe bool; UI toggles it via POST /v1/mode.
@@ -55,6 +57,12 @@ func New(cfg Config) http.Handler {
 	hub := cfg.Hub
 	if hub == nil {
 		hub = NewHub()
+	}
+
+	// Use caller-supplied notifier or the platform default.
+	notifier := cfg.Notifier
+	if notifier == nil {
+		notifier = alerter.Default()
 	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +91,7 @@ func New(cfg Config) http.Handler {
 	})
 
 	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		handleCreateSession(w, r, cfg, hub)
+		handleCreateSession(w, r, cfg, hub, notifier)
 	})
 
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +275,7 @@ type SessionEvent struct {
 	RawPayload       string  `json:"raw_payload,omitempty"`
 }
 
-func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub) {
+func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub, notifier alerter.Notifier) {
 	defer r.Body.Close()
 	var ev SessionEvent
 	dec := json.NewDecoder(r.Body)
@@ -304,6 +312,22 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub
 	}
 	// Notify SSE subscribers of the new/updated session.
 	hub.Broadcast(out)
+
+	// Fire a desktop notification if the session cost exceeds 2x the 7-day avg.
+	if cfg.DB != nil && ev.TotalCostUSD > 0 {
+		go func(costUSD float64, project string) {
+			avg, err := stats.RollingAvgCostUSD(cfg.DB)
+			if err != nil {
+				log.Printf("spike check avg: %v", err)
+				return
+			}
+			if avg > 0 && costUSD > 2*avg {
+				msg := fmt.Sprintf("Session cost $%.4f is %.1fx the 7-day avg ($%.4f)", costUSD, costUSD/avg, avg)
+				notifier.Notify("session-lens: cost spike", msg)
+			}
+		}(ev.TotalCostUSD, ev.ProjectPath)
+	}
+
 	status := http.StatusOK
 	if inserted {
 		status = http.StatusCreated
