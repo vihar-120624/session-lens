@@ -103,6 +103,8 @@
     .seg { display: flex; gap: 4px; }
     .seg button { background: var(--border); color: var(--muted); border: 0; padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
     .seg button.active { background: var(--accent); color: var(--text); }
+    .export-btn { background: var(--border); color: var(--muted); border: 0; padding: 6px 10px; border-radius: 6px; font-size: 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
+    .export-btn:hover { color: var(--text); }
 
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
@@ -252,7 +254,10 @@
   </div>
 
   <div class="panel">
-    <h2>Last 14 days</h2>
+    <div class="panel-head">
+      <h2>Last 14 days</h2>
+      <a class="export-btn" href="/v1/export/daily.csv" download>&#8675; Export daily CSV</a>
+    </div>
     <div class="chart-wrap"><canvas id="daily-chart"></canvas></div>
     <div class="empty" id="daily-empty" hidden>No sessions recorded yet.</div>
   </div>
@@ -282,7 +287,10 @@
   </div>
 
   <div class="panel">
-    <h2>Recent sessions</h2>
+    <div class="panel-head">
+      <h2>Recent sessions</h2>
+      <a class="export-btn" href="/v1/export/sessions.csv" download>&#8675; Export sessions CSV</a>
+    </div>
     <table>
       <thead>
         <tr>

@@ -4,6 +4,7 @@ package server
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -235,6 +236,88 @@ func New(cfg Config) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, out)
+	})
+
+	// GET /v1/export/daily.csv — daily cost summary as CSV.
+	mux.HandleFunc("GET /v1/export/daily.csv", func(w http.ResponseWriter, r *http.Request) {
+		days := intParam(r, "days", 30)
+		var buckets []stats.Bucket
+		if isMock(r, mode) {
+			buckets = dataset.Daily(days)
+		} else {
+			var err error
+			buckets, err = stats.Daily(cfg.DB, days)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		filename := "daily-" + time.Now().UTC().Format("2006-01-02") + ".csv"
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"date", "sessions", "total_cost_usd", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"})
+		for _, b := range buckets {
+			_ = cw.Write([]string{
+				b.Bucket,
+				strconv.FormatInt(b.SessionCount, 10),
+				strconv.FormatFloat(b.TotalCostUSD, 'f', 6, 64),
+				strconv.FormatInt(b.InputTokens, 10),
+				strconv.FormatInt(b.OutputTokens, 10),
+				strconv.FormatInt(b.CacheWriteTokens, 10),
+				strconv.FormatInt(b.CacheReadTokens, 10),
+			})
+		}
+		cw.Flush()
+	})
+
+	// GET /v1/export/sessions.csv — full session list as CSV.
+	mux.HandleFunc("GET /v1/export/sessions.csv", func(w http.ResponseWriter, r *http.Request) {
+		limit := intParam(r, "limit", 1000)
+		if limit > 10000 {
+			limit = 10000
+		}
+		var sessions []db.Session
+		if isMock(r, mode) {
+			// dataset.ListSessions caps at 100; bypass to return more rows.
+			all := dataset.Sessions
+			count := limit
+			if count > len(all) {
+				count = len(all)
+			}
+			sessions = make([]db.Session, 0, count)
+			for i := len(all) - 1; i >= len(all)-count; i-- {
+				sessions = append(sessions, all[i].ToDBSession())
+			}
+		} else {
+			var err error
+			sessions, err = db.ListSessions(cfg.DB, limit)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		filename := "sessions-" + time.Now().UTC().Format("2006-01-02") + ".csv"
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"id", "started_at", "ended_at", "project_path", "model", "turns", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "total_cost_usd"})
+		for _, s := range sessions {
+			_ = cw.Write([]string{
+				s.ID,
+				s.StartedAt,
+				s.EndedAt,
+				s.ProjectPath,
+				s.Model,
+				strconv.Itoa(s.Turns),
+				strconv.FormatInt(s.InputTokens, 10),
+				strconv.FormatInt(s.OutputTokens, 10),
+				strconv.FormatInt(s.CacheWriteTokens, 10),
+				strconv.FormatInt(s.CacheReadTokens, 10),
+				strconv.FormatFloat(s.TotalCostUSD, 'f', 6, 64),
+			})
+		}
+		cw.Flush()
 	})
 
 	// Static UI.
