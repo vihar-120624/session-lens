@@ -20,6 +20,7 @@ import (
 	"github.com/viharshah/session-lens/internal/db"
 	"github.com/viharshah/session-lens/internal/mock"
 	"github.com/viharshah/session-lens/internal/stats"
+	"github.com/viharshah/session-lens/internal/transcript"
 )
 
 // flusher is satisfied by http.ResponseWriters that support streaming.
@@ -33,10 +34,12 @@ const Version = "0.2.0"
 // Config holds the runtime knobs for the server.
 type Config struct {
 	DB            *sql.DB
+	DBPath        string // on-disk path; used by /v1/metrics to report size. Pass "" to skip.
+	BufferDir     string // hook buffer directory; used by /v1/metrics. Pass "" to skip.
 	StaticDir     string
 	PlanBudgetUSD float64
-	MockDefault   bool            // initial state of mock mode (driven by env var)
-	Hub           *Hub            // SSE broadcast hub; if nil a no-op hub is used
+	MockDefault   bool             // initial state of mock mode (driven by env var)
+	Hub           *Hub             // SSE broadcast hub; if nil a no-op hub is used
 	Notifier      alerter.Notifier // desktop notifications; if nil uses alerter.Default()
 }
 
@@ -66,6 +69,14 @@ func New(cfg Config) http.Handler {
 		notifier = alerter.Default()
 	}
 
+	// Per-IP rate limit for the ingest endpoint: 10 events/sec sustained,
+	// burst of 60. Far above any realistic Stop-hook traffic but blocks a
+	// misconfigured loop from filling the DB.
+	ingestLimiter := newRateLimiter(10, 60)
+
+	// Process-wide observability counters surfaced via GET /v1/metrics.
+	m := newMetrics()
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version, "mock": mode.Get()})
 	})
@@ -92,21 +103,78 @@ func New(cfg Config) http.Handler {
 	})
 
 	mux.HandleFunc("POST /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		handleCreateSession(w, r, cfg, hub, notifier)
+		if !ingestLimiter.Allow(clientIP(r)) {
+			m.ingestRateLimted.Add(1)
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, errors.New("rate limit exceeded"))
+			return
+		}
+		status := handleCreateSession(w, r, cfg, hub, notifier)
+		if status >= 200 && status < 300 {
+			m.ingestAccepted.Add(1)
+		} else {
+			m.ingestFailed.Add(1)
+		}
+	})
+
+	mux.HandleFunc("GET /v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, m.Snapshot(cfg.DB, cfg.DBPath, cfg.BufferDir))
 	})
 
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		limit := intParam(r, "limit", 20)
+		from := r.URL.Query().Get("from")
+		to := r.URL.Query().Get("to")
 		if isMock(r, mode) {
-			writeJSON(w, http.StatusOK, dataset.ListSessions(limit))
+			writeJSON(w, http.StatusOK, filterByEndedAt(dataset.ListSessions(limit), from, to))
 			return
 		}
-		rows, err := db.ListSessions(cfg.DB, limit)
+		rows, err := db.ListSessionsFiltered(cfg.DB, limit, from, to)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, rows)
+	})
+
+	mux.HandleFunc("GET /v1/sessions/{id}/breakdown", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if isMock(r, mode) {
+			// Mock mode has no transcript files; synthesise an empty breakdown.
+			writeJSON(w, http.StatusOK, transcript.Breakdown{ToolCounts: map[string]int{}})
+			return
+		}
+		s, err := db.GetSession(cfg.DB, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, fmt.Errorf("session %q not found", id))
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		// raw_payload is the original Stop-hook event JSON; pull transcript_path out of it.
+		var hook struct {
+			TranscriptPath string `json:"transcript_path"`
+		}
+		if s.RawPayload == "" {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("no raw_payload stored for this session"))
+			return
+		}
+		if err := json.Unmarshal([]byte(s.RawPayload), &hook); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("parse raw_payload: %w", err))
+			return
+		}
+		if hook.TranscriptPath == "" {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("raw_payload missing transcript_path"))
+			return
+		}
+		bd, err := transcript.BreakdownFile(hook.TranscriptPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("breakdown: %w", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, bd)
 	})
 
 	mux.HandleFunc("GET /v1/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +324,7 @@ func New(cfg Config) http.Handler {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"date", "sessions", "total_cost_usd", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"})
+		_ = cw.Write([]string{"date", "sessions", "total_cost_usd", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens"})
 		for _, b := range buckets {
 			_ = cw.Write([]string{
 				b.Bucket,
@@ -301,7 +369,7 @@ func New(cfg Config) http.Handler {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"id", "started_at", "ended_at", "project_path", "model", "turns", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "total_cost_usd"})
+		_ = cw.Write([]string{"id", "started_at", "ended_at", "project_path", "model", "turns", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "total_cost_usd"})
 		for _, s := range sessions {
 			_ = cw.Write([]string{
 				s.ID,
@@ -329,7 +397,15 @@ func New(cfg Config) http.Handler {
 		})
 	}
 
-	return logMiddleware(mux)
+	return logMiddleware(countingMiddleware(mux, m))
+}
+
+// countingMiddleware bumps the request_count counter on every request.
+func countingMiddleware(next http.Handler, m *metrics) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.requestCount.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // isMock returns true if the request should be served mock data — either
@@ -358,18 +434,19 @@ type SessionEvent struct {
 	RawPayload       string  `json:"raw_payload,omitempty"`
 }
 
-func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub, notifier alerter.Notifier) {
+// handleCreateSession returns the HTTP status code that was written to w.
+func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub, notifier alerter.Notifier) int {
 	defer r.Body.Close()
 	var ev SessionEvent
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&ev); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid json: %w", err))
-		return
+		return http.StatusBadRequest
 	}
 	if ev.ID == "" {
 		writeError(w, http.StatusBadRequest, errors.New("id required"))
-		return
+		return http.StatusBadRequest
 	}
 	if ev.EndedAt == "" {
 		ev.EndedAt = time.Now().UTC().Format(time.RFC3339)
@@ -391,7 +468,7 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub
 	out, inserted, err := db.UpsertSession(cfg.DB, row)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
-		return
+		return http.StatusInternalServerError
 	}
 	// Notify SSE subscribers of the new/updated session.
 	hub.Broadcast(out)
@@ -416,6 +493,7 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request, cfg Config, hub
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, out)
+	return status
 }
 
 // handleSSE streams newly-ingested sessions as Server-Sent Events.
@@ -475,6 +553,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// filterByEndedAt is the mock-mode equivalent of the SQL ended_at filter.
+// from/to are inclusive RFC3339 strings; "" disables that bound.
+func filterByEndedAt(sessions []db.Session, from, to string) []db.Session {
+	if from == "" && to == "" {
+		return sessions
+	}
+	out := make([]db.Session, 0, len(sessions))
+	for _, s := range sessions {
+		if from != "" && s.EndedAt < from {
+			continue
+		}
+		if to != "" && s.EndedAt > to {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 func intParam(r *http.Request, key string, def int) int {

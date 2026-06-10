@@ -140,6 +140,46 @@ func TestGetSession_200(t *testing.T) {
 	}
 }
 
+// TestListSessions_DateRange verifies that ?from=&to= bounds are respected.
+func TestListSessions_DateRange(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	// Three sessions across two days.
+	sessions := []db.Session{
+		{ID: "s-may26", EndedAt: "2026-05-26T23:00:00Z", Model: "claude-sonnet-4-6", TotalCostUSD: 0.10},
+		{ID: "s-may27a", EndedAt: "2026-05-27T09:30:00Z", Model: "claude-sonnet-4-6", TotalCostUSD: 0.20},
+		{ID: "s-may27b", EndedAt: "2026-05-27T18:45:00Z", Model: "claude-sonnet-4-6", TotalCostUSD: 0.30},
+		{ID: "s-may28", EndedAt: "2026-05-28T01:00:00Z", Model: "claude-sonnet-4-6", TotalCostUSD: 0.40},
+	}
+	for _, s := range sessions {
+		seedSession(t, ts, s)
+	}
+
+	// Range covers all of May 27 UTC only.
+	resp, err := http.Get(ts.URL + "/v1/sessions?from=2026-05-27T00:00:00Z&to=2026-05-27T23:59:59Z&limit=20")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 got %d", resp.StatusCode)
+	}
+
+	var got []db.Session
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 sessions in May 27 range, got %d", len(got))
+	}
+	for _, s := range got {
+		if s.ID != "s-may27a" && s.ID != "s-may27b" {
+			t.Errorf("unexpected session id in range: %s", s.ID)
+		}
+	}
+}
+
 // TestGetSession_404 verifies that requesting an unknown session id returns 404.
 func TestGetSession_404(t *testing.T) {
 	ts := newTestServer(t)

@@ -55,8 +55,9 @@ func ParseFile(path string) (*Summary, error) {
 func Parse(r io.Reader) (*Summary, error) {
 	s := &Summary{}
 	scanner := bufio.NewScanner(r)
-	// Allow very large lines (transcript messages can be big).
-	const maxLine = 16 * 1024 * 1024
+	// Allow very large lines (transcript messages can be big — tool results
+	// containing screenshots or large file contents have been seen at >16MB).
+	const maxLine = 64 * 1024 * 1024
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, maxLine)
 

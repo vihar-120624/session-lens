@@ -57,7 +57,7 @@ func TestExportDailyCsv_MockMode(t *testing.T) {
 		t.Fatalf("parse csv: %v", err)
 	}
 
-	wantHeader := []string{"date", "sessions", "total_cost_usd", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"}
+	wantHeader := []string{"date", "sessions", "total_cost_usd", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens"}
 	if len(records) == 0 {
 		t.Fatal("no rows in CSV")
 	}
@@ -140,7 +140,7 @@ func TestExportSessionsCsv_MockMode(t *testing.T) {
 		t.Fatalf("parse csv: %v", err)
 	}
 
-	wantHeader := []string{"id", "started_at", "ended_at", "project_path", "model", "turns", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "total_cost_usd"}
+	wantHeader := []string{"id", "started_at", "ended_at", "project_path", "model", "turns", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "total_cost_usd"}
 	if len(records) == 0 {
 		t.Fatal("no rows in CSV")
 	}

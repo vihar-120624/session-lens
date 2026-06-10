@@ -35,8 +35,11 @@ func main() {
 
 	staticDir := getenv("STATIC_DIR", "./web")
 	mockDefault := os.Getenv("MOCK_MODE") == "1"
+	bufferDir := getenv("SESSIONLENS_BUFFER_DIR", defaultBufferDir())
 	handler := server.New(server.Config{
 		DB:            conn,
+		DBPath:        dbPath,
+		BufferDir:     bufferDir,
 		StaticDir:     staticDir,
 		PlanBudgetUSD: planBudget,
 		MockDefault:   mockDefault,
@@ -83,4 +86,18 @@ func parseFloat(raw string, def float64) float64 {
 		return def
 	}
 	return v
+}
+
+// defaultBufferDir mirrors the path the Stop-hook uses for its disk buffer.
+// Kept in sync with sessionlens-hook's bufferDir.
+func defaultBufferDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "/tmp"
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "sessionlens", "buffer")
 }

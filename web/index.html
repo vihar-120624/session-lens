@@ -135,6 +135,15 @@
     .session-link:hover { text-decoration: underline; }
     #session-detail { display: none; }
     #session-detail.visible { display: block; }
+    .turn-summary { display: flex; gap: 24px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .turn-summary .dl { color: var(--muted); }
+    .turn-summary .dv { color: var(--text); margin-left: 4px; }
+    .tool-bars { display: grid; grid-template-columns: 100px 1fr 60px; gap: 4px 12px; align-items: center; max-width: 600px; }
+    .tool-row { display: contents; }
+    .tool-name { color: var(--text); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+    .tool-bar-wrap { background: var(--border); height: 8px; border-radius: 4px; overflow: hidden; }
+    .tool-bar { background: var(--accent); height: 100%; transition: width 0.3s ease; }
+    .tool-count { color: var(--muted); font-size: 12px; }
     .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
     .detail-item .dl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
     .detail-item .dv { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -314,6 +323,7 @@
     <h2 id="detail-title">Session</h2>
     <div class="detail-grid" id="detail-grid"></div>
     <div id="detail-cost-breakdown" style="margin-top:8px"></div>
+    <div id="detail-turn-breakdown" style="margin-top:20px"></div>
   </div>
 </div>
 
@@ -620,8 +630,98 @@ function showSessionDetail(s) {
       </tbody>
     </table>`;
 
+  // Reset turn breakdown — populated async by loadTurnBreakdown.
+  document.getElementById("detail-turn-breakdown").innerHTML = '<div class="empty">Loading per-turn breakdown…</div>';
+
   panel.classList.add("visible");
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  loadTurnBreakdown(s.id);
+}
+
+// loadTurnBreakdown fetches /v1/sessions/{id}/breakdown and renders the turn
+// table + tool-use summary. Silently no-ops if the endpoint returns 422
+// (no raw_payload, e.g. mock mode or legacy session).
+async function loadTurnBreakdown(id) {
+  const container = document.getElementById("detail-turn-breakdown");
+  const isMockNow = document.getElementById("mock-input").checked;
+  const qs = isMockNow ? "?mock=1" : "";
+  try {
+    const bd = await getJSON("/v1/sessions/" + encodeURIComponent(id) + "/breakdown" + qs);
+    renderTurnBreakdown(container, bd);
+  } catch (e) {
+    container.innerHTML = '<div class="empty">No per-turn data available (legacy session or missing transcript).</div>';
+  }
+}
+
+function renderTurnBreakdown(container, bd) {
+  if (!bd || !bd.turns || bd.turns.length === 0) {
+    container.innerHTML = '<div class="empty">No turns recorded.</div>';
+    return;
+  }
+
+  // Tool-use summary: sorted desc by count.
+  const toolEntries = Object.entries(bd.tool_counts || {}).sort((a, b) => b[1] - a[1]);
+  const maxCount = toolEntries.length ? toolEntries[0][1] : 0;
+  const toolBars = toolEntries.map(([name, count]) => {
+    const widthPct = maxCount > 0 ? Math.round((count / maxCount) * 100) : 0;
+    return `
+      <div class="tool-row">
+        <div class="tool-name">${escapeHtml(name)}</div>
+        <div class="tool-bar-wrap"><div class="tool-bar" style="width:${widthPct}%"></div></div>
+        <div class="tool-count num">${fmt.num(count)}</div>
+      </div>`;
+  }).join("");
+
+  const modelSwitch = (bd.model_switch || []).map(m => {
+    const fam = modelFamily(m);
+    return `<span class="swatch ${fam}"></span>${escapeHtml(m)}`;
+  }).join(" → ");
+
+  const duration = bd.duration_secs ? formatDuration(bd.duration_secs) : "—";
+
+  const rows = bd.turns.map(t => {
+    const fam = modelFamily(t.model);
+    const tokens = (t.input_tokens||0) + (t.output_tokens||0) + (t.cache_read_tokens||0) + (t.cache_write_tokens||0);
+    return `
+      <tr>
+        <td class="num">${t.index + 1}</td>
+        <td><span class="swatch ${fam}"></span>${escapeHtml(t.model || "—")}</td>
+        <td>${(t.tools || []).map(escapeHtml).join(", ") || "—"}</td>
+        <td class="num">${fmt.num(tokens)}</td>
+        <td class="num">${fmt.usd(t.cost_usd)}</td>
+      </tr>`;
+  }).join("");
+
+  container.innerHTML = `
+    <h2>Per-turn breakdown</h2>
+    <div class="turn-summary">
+      <div><span class="dl">Turns:</span> <span class="dv">${fmt.num(bd.turn_count)}</span></div>
+      <div><span class="dl">Duration:</span> <span class="dv">${duration}</span></div>
+      <div><span class="dl">Models:</span> <span class="dv">${modelSwitch || "—"}</span></div>
+    </div>
+    ${toolEntries.length ? `
+      <h2 style="margin-top:16px">Tool usage</h2>
+      <div class="tool-bars">${toolBars}</div>` : ""}
+    <h2 style="margin-top:16px">Turns</h2>
+    <table>
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Model</th>
+          <th>Tools</th>
+          <th class="num">Tokens</th>
+          <th class="num">Cost</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function formatDuration(secs) {
+  if (secs < 60) return secs.toFixed(0) + "s";
+  if (secs < 3600) return (secs/60).toFixed(1) + "m";
+  return (secs/3600).toFixed(2) + "h";
 }
 
 function hideSessionDetail() {

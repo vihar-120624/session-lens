@@ -128,19 +128,39 @@ ON CONFLICT(id) DO UPDATE SET
 // ListSessions returns the most-recent sessions ordered by ended_at DESC.
 // limit is capped at 100; pass 0 to get the default of 20.
 func ListSessions(conn *sql.DB, limit int) ([]Session, error) {
+	return ListSessionsFiltered(conn, limit, "", "")
+}
+
+// ListSessionsFiltered is ListSessions plus optional ended_at range filter.
+// from/to are inclusive RFC3339 strings (UTC); pass "" to omit either bound.
+// Lexicographic comparison is correct because all timestamps are stored
+// `Z`-suffixed by the hook.
+func ListSessionsFiltered(conn *sql.DB, limit int, from, to string) ([]Session, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > 10000 {
+		limit = 10000
 	}
-	const stmt = `
+	stmt := `
 SELECT id, COALESCE(project_path,''), COALESCE(started_at,''), ended_at,
        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
        total_cost_usd, COALESCE(model,''), turns, COALESCE(raw_payload,''),
        created_at, updated_at
-FROM sessions ORDER BY ended_at DESC LIMIT ?`
-	rows, err := conn.Query(stmt, limit)
+FROM sessions WHERE 1=1`
+	args := []any{}
+	if from != "" {
+		stmt += ` AND ended_at >= ?`
+		args = append(args, from)
+	}
+	if to != "" {
+		stmt += ` AND ended_at <= ?`
+		args = append(args, to)
+	}
+	stmt += ` ORDER BY ended_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := conn.Query(stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}

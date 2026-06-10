@@ -201,26 +201,78 @@ func postWithRetry(client httpPoster, url string, body []byte) error {
 }
 
 // drainBuffer iterates over buffered event files and attempts to post each one.
-// Successful deliveries are deleted; failures are left for the next run.
+// Successful deliveries are deleted; failures are renamed back for retry.
+//
+// Concurrency: multiple hook processes may run simultaneously. Each candidate
+// file is renamed to ".processing-<pid>" before being read, so only one process
+// owns it at a time. Files left in ".processing-*" form (e.g. crashed process)
+// are reclaimed on the next drain that lands.
 func drainBuffer(client httpPoster, url, dir string) {
+	// First reclaim any leftover ".processing-*" files from prior crashes back to plain ".json".
+	stale, _ := filepath.Glob(filepath.Join(dir, "*.json.processing-*"))
+	for _, sf := range stale {
+		orig := stripProcessingSuffix(sf)
+		if orig != "" {
+			_ = os.Rename(sf, orig)
+		}
+	}
+
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil || len(files) == 0 {
 		return
 	}
+	suffix := fmt.Sprintf(".processing-%d", os.Getpid())
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		claimed := f + suffix
+		if err := os.Rename(f, claimed); err != nil {
+			// Another process likely won the race, or the file vanished. Skip silently.
+			continue
+		}
+		data, err := os.ReadFile(claimed)
 		if err != nil {
-			logErr(fmt.Errorf("drain read %s: %w", f, err))
+			logErr(fmt.Errorf("drain read %s: %w", claimed, err))
+			_ = os.Rename(claimed, f)
 			continue
 		}
 		if err := postWithRetry(client, url, data); err != nil {
-			logErr(fmt.Errorf("drain post %s: %w", f, err))
+			logErr(fmt.Errorf("drain post %s: %w", claimed, err))
+			_ = os.Rename(claimed, f)
 			continue
 		}
-		if err := os.Remove(f); err != nil {
-			logErr(fmt.Errorf("drain delete %s: %w", f, err))
+		if err := os.Remove(claimed); err != nil {
+			logErr(fmt.Errorf("drain delete %s: %w", claimed, err))
 		}
 	}
+}
+
+// stripProcessingSuffix returns the original filename if path ends in
+// ".processing-<digits>", or "" if it doesn't match.
+func stripProcessingSuffix(path string) string {
+	const marker = ".processing-"
+	i := lastIndex(path, marker)
+	if i < 0 {
+		return ""
+	}
+	// Verify everything after marker is digits.
+	tail := path[i+len(marker):]
+	if tail == "" {
+		return ""
+	}
+	for _, c := range tail {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return path[:i]
+}
+
+func lastIndex(s, sub string) int {
+	for i := len(s) - len(sub); i >= 0; i-- {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }
 
 // writeBuffer persists body to the buffer directory.
@@ -243,7 +295,13 @@ func writeBuffer(dir string, body []byte) error {
 
 	name := fmt.Sprintf("%d-%06d.json", time.Now().UnixNano(), rand.Intn(1_000_000))
 	path := filepath.Join(dir, name)
-	return os.WriteFile(path, body, 0o644)
+	// Write to a temp file first then rename, so a drainer can never read
+	// a half-written buffer file.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // bufferDir returns the path to the buffer directory.
